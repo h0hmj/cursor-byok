@@ -12,6 +12,26 @@ pub enum SubagentKind {
     Named(String),
 }
 
+impl SubagentKind {
+    pub fn from_type_name(value: &str) -> Self {
+        if value == "generalPurpose" {
+            Self::GeneralPurpose
+        } else {
+            Self::Named(value.into())
+        }
+    }
+}
+
+pub fn override_for<'a>(
+    overrides: &'a [(SubagentKind, SubagentModelOverride)],
+    kind: &SubagentKind,
+) -> Option<&'a SubagentModelOverride> {
+    overrides
+        .iter()
+        .find(|(entry, _)| entry == kind)
+        .map(|(_, value)| value)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RunKind {
     Root,

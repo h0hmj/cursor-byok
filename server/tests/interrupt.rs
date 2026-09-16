@@ -298,6 +298,7 @@ async fn client_heartbeat_returns_a_server_protocol_heartbeat() {
             },
         },
         None,
+        None,
     )
     .await
     .unwrap();
@@ -463,6 +464,7 @@ async fn queued_user_message_after_turn_ended_starts_the_next_turn() {
             seqno: append_seqno,
             message: runtime_user_message(),
         },
+        None,
         None,
     )
     .await

@@ -631,12 +631,14 @@ fn spawn_run_request(
             handle.parent().map(|parent| parent.tool_call_id.clone()),
             request.conversation_state.clone(),
         );
+        let subagent_model_context = dependencies.subagent_models.snapshot().context();
         let prepared = tokio::select! {
             biased;
             _ = generation.superseded.cancelled() => return,
             prepared = compile::prepare(
                 handle.request_id(),
                 &request,
+                &subagent_model_context,
                 compile::PrepareDependencies {
                     compiler: &dependencies.compiler,
                     store: &dependencies.store,

@@ -6,6 +6,7 @@ pub mod conversation;
 pub mod prompting;
 pub mod protocol;
 pub mod services;
+pub mod subagent;
 pub mod tools;
 pub mod transport;
 

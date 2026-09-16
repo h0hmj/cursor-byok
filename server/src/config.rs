@@ -23,6 +23,11 @@ pub fn managed_data_dir() -> Result<PathBuf> {
     Ok(data_dir)
 }
 
+/// User-managed model selection policy, independent of database configuration.
+pub fn subagent_models_path() -> Result<PathBuf> {
+    Ok(managed_data_dir()?.join("subagent-models.yaml"))
+}
+
 pub fn v0049_config_path() -> Result<PathBuf> {
     let home_dir = dirs::home_dir()
         .ok_or_else(|| Error::Config("cannot resolve user home directory".into()))?;

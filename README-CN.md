@@ -199,6 +199,10 @@ make build-desktop   # 构建 Tauri 桌面安装包
 make build-docker    # 构建 Docker 镜像
 ```
 
+## 子代理模型映射
+
+支持通过 YAML 配置子代理默认模型、按 type 选模和官方模型映射，并在保存后热更新。详见[子代理模型配置与调用说明](./docs/subagent-models.md)。
+
 ## 路线图
 
 项目将继续改进模型兼容性、Agent 工具、本地运行稳定性和自托管体验，并探索支持更多 IDE、聊天和 Agent 工作流。

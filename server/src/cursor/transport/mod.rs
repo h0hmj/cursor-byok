@@ -10,4 +10,4 @@ pub use handle::*;
 pub use inbox::*;
 pub(crate) use lifecycle::*;
 pub use output::*;
-pub use registry::*;
+pub use registry::{AdmittedRun, ModelRole, PreparedRunModel, TransportRegistry, TransportRoute};

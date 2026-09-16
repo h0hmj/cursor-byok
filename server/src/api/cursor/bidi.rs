@@ -40,6 +40,26 @@ impl DecodedAppend {
             })
     }
 
+    /// Re-encode both protobuf layers only when routing actually changes the model.
+    /// Preserve the inbound unary envelope convention (raw protobuf or Connect-framed).
+    pub fn rewritten_body(
+        &self,
+        request: &ai::BidiAppendRequest,
+        original: &bytes::Bytes,
+    ) -> Result<bytes::Bytes> {
+        let mut request = request.clone();
+        request.data = hex::encode(self.message.encode_to_vec());
+        if original.len() >= 5
+            && original[0] & crate::cursor::protocol::connect::END_STREAM_FLAG == 0
+            && u32::from_be_bytes(original[1..5].try_into().expect("four bytes")) as usize
+                == original.len() - 5
+        {
+            crate::cursor::protocol::connect::encode_message(&request)
+        } else {
+            Ok(request.encode_to_vec().into())
+        }
+    }
+
     pub fn conversation_id(&self) -> Option<&str> {
         let agent::agent_client_message::Message::RunRequest(request) =
             self.message.message.as_ref()?
@@ -181,19 +201,36 @@ pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
 
 pub async fn append(
     registry: &TransportRegistry,
-    request: DecodedAppend,
+    mut request: DecodedAppend,
     parent: Option<TransportParent>,
+    admitted: Option<crate::cursor::transport::AdmittedRun>,
 ) -> Result<ai::BidiAppendResponse> {
-    let replace_closing = request.model_id().is_some();
-    let handle = registry
-        .get_or_create_for_append(&request.request_id, replace_closing)
-        .await?;
+    let handle = if let Some(admitted) = &admitted {
+        admitted
+            .handle
+            .clone()
+            .ok_or_else(|| Error::Protocol("local Run admission missing transport handle".into()))?
+    } else {
+        let replace_closing = request.model_id().is_some();
+        registry
+            .get_or_create_for_append(&request.request_id, replace_closing, None)
+            .await?
+            .0
+    };
     let _admission = handle.admit()?;
     if let Some(conversation_id) = request.conversation_id() {
         handle.set_conversation_id(conversation_id)?;
     }
     if let Some(parent) = parent {
         handle.set_parent(parent)?;
+    }
+    if let Some(admitted) = &admitted {
+        sync_run_model(&mut request, admitted)?;
+        if admitted.defer_primary {
+            registry
+                .commit_primary_model(&request.request_id, &admitted.model)
+                .await?;
+        }
     }
     if matches!(
         request.message.message.as_ref(),
@@ -208,4 +245,25 @@ pub async fn append(
         })
         .await?;
     Ok(ai::BidiAppendResponse {})
+}
+
+fn sync_run_model(
+    request: &mut DecodedAppend,
+    admitted: &crate::cursor::transport::AdmittedRun,
+) -> Result<()> {
+    let Some(agent::agent_client_message::Message::RunRequest(run)) =
+        request.message.message.as_mut()
+    else {
+        return Err(Error::Protocol(
+            "local Run admission requires a RunRequest to sync model".into(),
+        ));
+    };
+    crate::cursor::compile::rewrite_requested_model(
+        run,
+        &crate::cursor::compile::ModelRewrite {
+            model_id: admitted.model.clone(),
+            effort: admitted.effort.clone(),
+        },
+    );
+    Ok(())
 }

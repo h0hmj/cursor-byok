@@ -194,7 +194,11 @@ pub fn request_context(request: &pb::AgentRunRequest) -> Option<&pb::RequestCont
         })
 }
 
-pub fn compile_context(context: &pb::RequestContext, today: &str) -> String {
+pub fn compile_context(
+    context: &pb::RequestContext,
+    today: &str,
+    subagent_model_context: &str,
+) -> String {
     let mut sections = Vec::new();
     let mut transcripts = None;
     if let Some(env) = &context.env {
@@ -302,6 +306,9 @@ pub fn compile_context(context: &pb::RequestContext, today: &str) -> String {
                 servers.join("\n")
             ));
         }
+    }
+    if !subagent_model_context.is_empty() {
+        sections.push(subagent_model_context.to_owned());
     }
     sections.join("\n\n")
 }
@@ -586,6 +593,23 @@ fn xml(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_policy_is_appended_verbatim_to_request_context() {
+        let context = pb::RequestContext {
+            non_file_rules: vec![rule("Keep the existing rules")],
+            ..Default::default()
+        };
+        let policy = "<subagent_model_context>\nmodels: sol, luna\n</subagent_model_context>";
+        let base = compile_context(&context, "today", "");
+        let compiled = compile_context(&context, "today", policy);
+        assert_eq!(compiled, format!("{base}\n\n{policy}"));
+        assert_eq!(compiled, compile_context(&context, "today", policy));
+        assert_eq!(
+            compile_context(&pb::RequestContext::default(), "today", policy),
+            policy
+        );
+    }
 
     fn rule(content: &str) -> pb::CursorRule {
         pb::CursorRule {

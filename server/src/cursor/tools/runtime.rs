@@ -9,7 +9,11 @@ use std::{
 
 use tokio::sync::Mutex;
 
-use crate::{cursor::protocol::proto::agent::v1 as pb, model::ToolCall, Error, Result};
+use crate::{
+    cursor::protocol::proto::agent::v1 as pb,
+    model::{override_for, SubagentKind, SubagentModelOverride, ToolCall},
+    Error, Result,
+};
 
 use super::edit::EditWrite;
 
@@ -43,9 +47,8 @@ pub struct ExecContext {
     pub conversation_id: String,
     pub root_conversation_id: String,
     pub default_subagent_model: String,
-    pub subagent_model: Option<SubagentModel>,
+    pub overrides: Vec<(SubagentKind, SubagentModelOverride)>,
     pub allow_subagents: bool,
-    pub subagents_disabled: bool,
     pub terminals_folder: String,
     pub admin_command_denylist: Vec<String>,
     pub mcp_routes: HashMap<(String, String), McpRoute>,
@@ -59,18 +62,15 @@ pub struct McpRoute {
     pub description: String,
 }
 
-#[derive(Clone, Debug)]
-pub enum SubagentModel {
-    Model(String),
-    Disabled,
-}
-
 impl ExecContext {
     pub fn task_disabled(&self, call: &ToolCall) -> bool {
         if !call.name.eq_ignore_ascii_case("Task") {
             return false;
         }
-        self.subagents_disabled || matches!(self.subagent_model, Some(SubagentModel::Disabled))
+        matches!(
+            override_for(&self.overrides, &task_subagent_kind(call)),
+            Some(SubagentModelOverride::Disabled)
+        )
     }
 
     pub fn prepare_call(&self, call: &ToolCall) -> Result<ToolCall> {
@@ -81,23 +81,25 @@ impl ExecContext {
             .arguments
             .as_object()
             .ok_or_else(|| Error::Protocol("Task arguments must be a JSON object".into()))?;
-        let subagent_type = arguments
-            .get("subagent_type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("generalPurpose");
+        let kind = task_subagent_kind(call);
+        let subagent_type = match &kind {
+            SubagentKind::GeneralPurpose => "generalPurpose",
+            SubagentKind::Named(name) => name.as_str(),
+        };
         if self.task_disabled(call) {
             return Ok(call.clone());
         }
-        let model = match &self.subagent_model {
-            Some(SubagentModel::Model(model)) => model.clone(),
-            Some(SubagentModel::Disabled) => unreachable!("disabled Task returned above"),
-            None => arguments
-                .get("model")
-                .and_then(serde_json::Value::as_str)
-                .filter(|model| *model != "inherit")
-                .unwrap_or(&self.default_subagent_model)
-                .to_string(),
-        };
+        // Model selection belongs to the model-facing policy. UI selections only
+        // enforce disabled types here; never overwrite an explicit tool argument.
+        let model = match arguments.get("model") {
+            None => &self.default_subagent_model,
+            Some(serde_json::Value::String(model)) if model == "inherit" => {
+                &self.default_subagent_model
+            }
+            Some(serde_json::Value::String(model)) => model,
+            Some(_) => return Err(Error::Protocol("Task model must be a string".into())),
+        }
+        .to_string();
         if model.is_empty() {
             return Err(Error::Protocol(format!(
                 "Task subagent type {subagent_type} has no model"
@@ -111,6 +113,15 @@ impl ExecContext {
             .insert("model".into(), serde_json::Value::String(model));
         Ok(prepared)
     }
+}
+
+fn task_subagent_kind(call: &ToolCall) -> SubagentKind {
+    let type_name = call
+        .arguments
+        .get("subagent_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("generalPurpose");
+    SubagentKind::from_type_name(type_name)
 }
 
 pub(crate) struct PendingInteraction {
@@ -364,4 +375,110 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ModelSpec;
+    use serde_json::json;
+
+    fn task_call(subagent_type: &str, model: &str) -> ToolCall {
+        ToolCall {
+            index: 0,
+            call_id: "call".into(),
+            model_call_id: "model:0".into(),
+            name: "Task".into(),
+            arguments_text: "{}".into(),
+            arguments: json!({
+                "subagent_type": subagent_type,
+                "model": model,
+                "description": "test",
+                "prompt": "hi",
+            }),
+            argument_error: None,
+        }
+    }
+
+    fn context_with(overrides: Vec<(SubagentKind, SubagentModelOverride)>) -> ExecContext {
+        ExecContext {
+            conversation_id: "conversation".into(),
+            root_conversation_id: "conversation".into(),
+            default_subagent_model: "sol".into(),
+            overrides,
+            allow_subagents: true,
+            terminals_folder: String::new(),
+            admin_command_denylist: Vec::new(),
+            mcp_routes: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn prepare_call_preserves_explicit_model_despite_ui_selection() {
+        for selection in [
+            SubagentModelOverride::Explicit(ModelSpec::new("luna")),
+            SubagentModelOverride::Inherit,
+        ] {
+            let context = context_with(vec![(SubagentKind::Named("explore".into()), selection)]);
+            let prepared = context
+                .prepare_call(&task_call("explore", "chosen"))
+                .unwrap();
+            assert_eq!(prepared.arguments["model"], "chosen");
+        }
+    }
+
+    #[test]
+    fn prepare_call_normalizes_only_inherit_or_absent_model() {
+        let context = context_with(vec![(
+            SubagentKind::Named("explore".into()),
+            SubagentModelOverride::Explicit(ModelSpec::new("luna")),
+        )]);
+        let inherited = context
+            .prepare_call(&task_call("explore", "inherit"))
+            .unwrap();
+        assert_eq!(inherited.arguments["model"], "sol");
+
+        let mut absent = task_call("explore", "inherit");
+        absent.arguments.as_object_mut().unwrap().remove("model");
+        let prepared = context.prepare_call(&absent).unwrap();
+        assert_eq!(prepared.arguments["model"], "sol");
+
+        let mut invalid = task_call("explore", "inherit");
+        invalid.arguments["model"] = json!(123);
+        assert!(context.prepare_call(&invalid).is_err());
+        assert!(context.prepare_call(&task_call("explore", "")).is_err());
+    }
+
+    #[test]
+    fn disabled_type_does_not_disable_other_types() {
+        let context = context_with(vec![(
+            SubagentKind::Named("explore".into()),
+            SubagentModelOverride::Disabled,
+        )]);
+        let disabled = task_call("explore", "inherit");
+        assert!(context.task_disabled(&disabled));
+        assert_eq!(
+            context.prepare_call(&disabled).unwrap().arguments,
+            disabled.arguments
+        );
+
+        let enabled = task_call("generalPurpose", "inherit");
+        assert!(!context.task_disabled(&enabled));
+        assert_eq!(
+            context.prepare_call(&enabled).unwrap().arguments["model"],
+            "sol"
+        );
+    }
+
+    #[test]
+    fn prepare_call_honors_inherit_override_for_explore() {
+        let context = context_with(vec![(
+            SubagentKind::Named("explore".into()),
+            SubagentModelOverride::Inherit,
+        )]);
+        let prepared = context
+            .prepare_call(&task_call("explore", "inherit"))
+            .unwrap();
+        assert_eq!(prepared.arguments["model"], "sol");
+    }
 }

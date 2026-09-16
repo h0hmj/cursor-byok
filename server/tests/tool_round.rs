@@ -48,11 +48,10 @@ fn exec_context() -> ExecContext {
         conversation_id: "conversation".into(),
         root_conversation_id: "conversation".into(),
         default_subagent_model: "model".into(),
-        subagent_model: None,
+        overrides: Vec::new(),
         terminals_folder: "/tmp/terminals".into(),
         admin_command_denylist: Vec::new(),
         allow_subagents: true,
-        subagents_disabled: false,
         mcp_routes: std::collections::HashMap::new(),
     }
 }
@@ -709,6 +708,69 @@ async fn tool_success_is_not_inferred_from_debug_text() {
         completion.tool_call().tool,
         Some(pb::tool_call::Tool::EditToolCall(_))
     ));
+}
+
+#[tokio::test]
+async fn custom_task_type_preserves_selected_model_when_another_type_is_disabled() {
+    use cursor_server::model::{ModelSpec, SubagentKind, SubagentModelOverride};
+
+    for selection in [
+        SubagentModelOverride::Explicit(ModelSpec::new("ui-choice")),
+        SubagentModelOverride::Inherit,
+    ] {
+        let dispatcher = ToolDispatcher::new(CursorToolRuntime::default());
+        let mut context = exec_context();
+        context.overrides = vec![
+            (
+                SubagentKind::Named("explore".into()),
+                SubagentModelOverride::Disabled,
+            ),
+            (SubagentKind::Named("custom-reviewer".into()), selection),
+        ];
+        let mut task = call("custom-task", "Task");
+        task.arguments = json!({
+            "description": "Review one module",
+            "prompt": "Review the requested module",
+            "subagent_type": "custom-reviewer",
+            "model": "selected-model"
+        });
+        let dispatched = dispatcher
+            .start_batch(
+                &[task],
+                ToolBatchState {
+                    completed: &HashSet::new(),
+                    started: &HashSet::new(),
+                    response_text: "",
+                    response_thinking: "",
+                },
+                &[],
+                &BTreeMap::new(),
+                &context,
+            )
+            .await
+            .unwrap();
+        assert!(
+            dispatched[0].completion.is_none(),
+            "enabled custom type must dispatch"
+        );
+        let args = dispatched[0]
+            .messages
+            .iter()
+            .find_map(|message| {
+                let Some(pb::agent_server_message::Message::ExecServerMessage(exec)) =
+                    &message.message
+                else {
+                    return None;
+                };
+                match &exec.message {
+                    Some(pb::exec_server_message::Message::SubagentArgs(args)) => Some(args),
+                    _ => None,
+                }
+            })
+            .expect("custom Task must produce a client execution request");
+        assert_eq!(args.subagent_type, "custom-reviewer");
+        assert_eq!(args.model_id, "selected-model");
+    }
 }
 
 #[tokio::test]

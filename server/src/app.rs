@@ -36,6 +36,11 @@ impl App {
                 .listen_addr
                 .set_port(store.port_settings().await?.service_port);
         }
+        let subagent_models = crate::cursor::subagent::SubagentModels::load(
+            crate::config::subagent_models_path()?,
+            store.clone(),
+        )
+        .await?;
         let assets = PromptAssets::embedded()?;
         let compiler = PromptCompiler::new(assets);
         let plugin_runtime = PluginRuntime::managed()?;
@@ -59,6 +64,7 @@ impl App {
             WebCache::managed()?,
             plugins.clone(),
             crate::config::managed_data_dir()?.join("rules"),
+            subagent_models,
         );
         let control = control::ControlService::new(
             store.clone(),
@@ -134,6 +140,12 @@ impl App {
         self.harness.set_backend_addr(address);
         tracing::info!(%address, "cursor server listening");
         let registry = self.registry;
+        let reload_models = registry.subagent_models().clone();
+        let reload_shutdown = shutdown.child_token();
+        let reload_token = reload_shutdown.clone();
+        let reload_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            reload_models.run_reload_loop(reload_token).await;
+        }));
         let harness = self.harness;
         let graceful = shutdown.clone();
         let server = axum::serve(listener, self.router)
@@ -160,6 +172,10 @@ impl App {
                     Err(_) => tracing::warn!("graceful shutdown timed out; forcing server close"),
                 }
             }
+        }
+        reload_shutdown.cancel();
+        if let Err(error) = reload_task.await {
+            tracing::warn!(%error, "subagent model reload task stopped unexpectedly");
         }
         Ok(())
     }

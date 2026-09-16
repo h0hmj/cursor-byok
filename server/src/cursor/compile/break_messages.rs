@@ -228,6 +228,7 @@ async fn compile_with_timestamp(
 pub(super) fn compile_request_context(
     event_id: &str,
     request_context: &pb::RequestContext,
+    subagent_model_context: &str,
     history: &[CanonicalMessage],
 ) -> Result<Option<CanonicalMessage>> {
     let time = Time::now(
@@ -236,7 +237,7 @@ pub(super) fn compile_request_context(
             .as_ref()
             .map(|env| env.time_zone.as_str()),
     )?;
-    let text = context::compile_context(request_context, &time.today);
+    let text = context::compile_context(request_context, &time.today, subagent_model_context);
     if text.is_empty() {
         return Ok(None);
     }
@@ -388,5 +389,51 @@ impl Time {
             timestamp: format!("{} ({utc})", now.format("%A, %b %-d, %Y, %-I:%M %p")),
             today: now.format("%A %b %-d,\n%Y").to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::project_messages;
+
+    #[test]
+    fn model_policy_changes_append_context_and_preserve_provider_prefix() {
+        let context = pb::RequestContext::default();
+        let mut history = Vec::new();
+        let policies = ["policy A", "policy A", "policy B", "policy A"];
+        for (index, policy) in policies.into_iter().enumerate() {
+            let prefix = project_messages(&history).unwrap();
+            let event = format!("turn-{index}");
+            let update = compile_request_context(&event, &context, policy, &history).unwrap();
+            assert_eq!(update.is_some(), index != 1);
+            if let Some(update) = update {
+                assert_eq!(update.message_id, format!("request-context:{event}"));
+                history.push(update);
+            }
+            // Retrying the same event must not append a duplicate context.
+            assert!(compile_request_context(&event, &context, policy, &history)
+                .unwrap()
+                .is_none());
+            history.push(CanonicalMessage::text(
+                format!("runtime:{event}"),
+                Role::User,
+                Origin::Runtime,
+                format!("query {index}"),
+            ));
+            let projected = project_messages(&history).unwrap();
+            assert_eq!(prefix, projected[..prefix.len()]);
+        }
+        let contexts = history
+            .iter()
+            .filter(|message| message.message_id.starts_with("request-context:"))
+            .collect::<Vec<_>>();
+        assert_eq!(contexts.len(), 3);
+        assert_eq!(contexts[0].content, contexts[2].content);
+        assert_ne!(contexts[0].message_id, contexts[2].message_id);
+        for index in [0, 3, 5] {
+            assert!(history[index].message_id.starts_with("request-context:"));
+            assert!(history[index + 1].message_id.starts_with("runtime:"));
+        }
     }
 }

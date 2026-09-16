@@ -406,7 +406,37 @@ async fn eligible_pending_checkpoint_resumes_tools_before_the_next_model_call() 
         .root_prompt_messages_json
         .iter()
         .all(|id| !resumed_set_blob_ids.contains(id)));
-    assert_eq!(provider.requests().len(), 2);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].prompt.instructions,
+        requests[1].prompt.instructions
+    );
+    assert_eq!(requests[0].prompt.tools, requests[1].prompt.tools);
+    assert_eq!(
+        requests[0].history,
+        requests[1].history[..requests[0].history.len()],
+        "checkpoint recovery must preserve the entire provider-visible prefix"
+    );
+    let original_contexts = requests[0]
+        .history
+        .iter()
+        .filter(|message| message.message_id.starts_with("request-context:"))
+        .collect::<Vec<_>>();
+    let recovered_contexts = requests[1]
+        .history
+        .iter()
+        .filter(|message| message.message_id.starts_with("request-context:"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        original_contexts.len(),
+        1,
+        "default policy is projected once"
+    );
+    assert_eq!(
+        original_contexts, recovered_contexts,
+        "context identity and content must survive checkpoint recovery without duplication"
+    );
     assert!(resumed_checkpoints
         .last()
         .unwrap()

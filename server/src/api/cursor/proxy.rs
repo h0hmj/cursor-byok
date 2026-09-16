@@ -53,6 +53,14 @@ impl CursorProxy {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test_upstream(
+        clients: crate::network::NetworkClients,
+        upstream: String,
+    ) -> Self {
+        Self { clients, upstream }
+    }
+
     async fn client(&self) -> Result<reqwest::Client> {
         self.clients.cursor_client().await
     }

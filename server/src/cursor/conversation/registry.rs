@@ -26,6 +26,7 @@ pub(crate) struct ConversationDependencies {
     pub provider: Arc<dyn Provider>,
     pub compiler: PromptCompiler,
     pub web_cache: WebCache,
+    pub subagent_models: crate::cursor::subagent::SubagentModels,
     /// 本地 rules 服务的 md 存储目录;编译请求上下文时合并其中的规则。
     pub local_rules_dir: Option<std::path::PathBuf>,
 }
@@ -50,6 +51,7 @@ impl ConversationRegistry {
         compiler: PromptCompiler,
         web_cache: WebCache,
         local_rules_dir: Option<std::path::PathBuf>,
+        subagent_models: crate::cursor::subagent::SubagentModels,
     ) -> Self {
         Self {
             inner: Arc::new(RegistryInner {
@@ -61,6 +63,7 @@ impl ConversationRegistry {
                     provider,
                     compiler,
                     web_cache,
+                    subagent_models,
                     local_rules_dir,
                 },
             }),

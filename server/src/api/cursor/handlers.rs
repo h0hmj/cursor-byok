@@ -1,4 +1,7 @@
 //! Implements Cursor HTTP endpoints outside the Agent Run stream.
+#[cfg(test)]
+#[path = "routing_tests.rs"]
+mod routing_tests;
 use axum::{
     body::{to_bytes, Body, Bytes},
     extract::{DefaultBodyLimit, Extension, State},
@@ -15,6 +18,7 @@ use crate::{
         run_sse,
     },
     cursor::{
+        compile::{rewrite_requested_model, EffortAction, ModelRewrite},
         protocol::{
             connect,
             proto::{agent::v1 as agent, aiserver::v1 as ai},
@@ -23,7 +27,8 @@ use crate::{
             account, analytics, commit_message, compatibility, entitlement::FreeEntitlementCache,
             knowledge, model_catalog, server_config, tab,
         },
-        transport::{TransportParent, TransportRegistry},
+        subagent::{is_composer_model, ResolutionReason},
+        transport::{ModelRole, PreparedRunModel, TransportParent, TransportRegistry},
     },
     Result,
 };
@@ -230,37 +235,64 @@ async fn bidi_handler(
     Extension(proxy): Extension<CursorProxy>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
-    let (parts, body) = buffered(request).await?;
+    let (mut parts, body) = buffered(request).await?;
     let request: ai::BidiAppendRequest = connect::decode_unary(&body)?;
-    let decoded = bidi::decode(&request)?;
-    let first_model = decoded.model_id().map(str::to_owned);
+    let mut decoded = bidi::decode(&request)?;
+    let prepared = select_run_model(&registry, &mut decoded, &parts.headers).await?;
     let conversation_id = decoded.conversation_id().map(str::to_owned);
-    let trace_metadata = decoded.trace_metadata();
     let trace = registry.trace(&decoded.request_id);
-    let local = if let Some(model_id) = decoded.model_id() {
-        // 插件模型 ID 只在本地有意义,永远不转发到 Cursor 官方上游。
-        if model_id.starts_with(crate::plugin::ADAPTER_ID_PREFIX)
-            || registry.store().model(model_id).await?.is_some()
-        {
-            tracing::info!(
-                request_id = decoded.request_id,
-                model_id,
-                "routing Cursor Run to BYOK provider"
+    // Validate parent headers before admission so a rejected append cannot bind identity.
+    let parent = match parent_headers(&parts.headers) {
+        Ok(parent) => parent,
+        Err(error) => {
+            let trace_metadata = decoded.trace_metadata();
+            if prepared.is_some() {
+                trace.begin(conversation_id.as_deref(), "rejected", decoded.model_id());
+            } else {
+                trace.resume();
+            }
+            trace.request(
+                "bidi_request",
+                body,
+                trace_outcome(
+                    trace_metadata,
+                    false,
+                    "invalid_parent",
+                    Some(error.to_string()),
+                ),
             );
-            true
-        } else {
-            tracing::info!(
-                request_id = decoded.request_id,
-                model_id,
-                "routing Cursor Run to Cursor upstream"
-            );
-            false
+            return Err(error);
         }
+    };
+
+    let (local, forwarded_body, admitted) = if let Some(prepared) = prepared {
+        // Ownership + locality are decided together; decoded/body sync to the owned model.
+        let admitted = registry
+            .admit_run_model(&decoded.request_id, &prepared)
+            .await?;
+        sync_decoded_model(&mut decoded, &admitted)?;
+        let changed = admitted.rewrites_wire(&prepared.original);
+        let forwarded_body =
+            forwarded_body(&decoded, &request, &body, &mut parts.headers, changed)?;
+        tracing::info!(
+            request_id = decoded.request_id,
+            original_model = prepared.original,
+            candidate_model = prepared.model,
+            candidate_effort_action = ?prepared.effort,
+            selected_model = admitted.model,
+            selected_effort_action = ?admitted.effort,
+            selection_differs_from_candidate = prepared.model != admitted.model
+                || prepared.effort != admitted.effort,
+            route = if admitted.local { "local_byok" } else { "cursor_official" },
+            "admitted Cursor Run model selection"
+        );
+        (admitted.local, forwarded_body, Some(admitted))
     } else if registry.local(&decoded.request_id).await.is_some() {
-        true
+        (true, body.clone(), None)
     } else if registry.upstream(&decoded.request_id).await {
-        false
+        (false, body.clone(), None)
     } else {
+        let trace_metadata = decoded.trace_metadata();
         trace.resume();
         trace.request(
             "bidi_request",
@@ -271,6 +303,9 @@ async fn bidi_handler(
             "first BidiAppend message must select a model".into(),
         ));
     };
+
+    let first_model = decoded.model_id().map(str::to_owned);
+    let trace_metadata = decoded.trace_metadata();
     if first_model.is_some() {
         trace.begin(
             conversation_id.as_deref(),
@@ -285,9 +320,6 @@ async fn bidi_handler(
         trace.resume();
     }
     if !local {
-        if first_model.is_some() {
-            registry.mark_upstream(&decoded.request_id).await;
-        }
         trace.request(
             "bidi_request",
             body.clone(),
@@ -295,27 +327,11 @@ async fn bidi_handler(
         );
         return proxy::forward(
             Extension(proxy),
-            Request::from_parts(parts, Body::from(body)),
+            Request::from_parts(parts, Body::from(forwarded_body)),
         )
         .await;
     }
-    let parent = match parent_headers(&parts.headers) {
-        Ok(parent) => parent,
-        Err(error) => {
-            trace.request(
-                "bidi_request",
-                body,
-                trace_outcome(
-                    trace_metadata,
-                    false,
-                    "invalid_parent",
-                    Some(error.to_string()),
-                ),
-            );
-            return Err(error);
-        }
-    };
-    match bidi::append(&registry, decoded, parent).await {
+    match bidi::append(&registry, decoded, parent, admitted).await {
         Ok(_) => trace.request(
             "bidi_request",
             body,
@@ -342,6 +358,151 @@ async fn bidi_handler(
         HeaderValue::from_static("application/proto"),
     );
     Ok(response)
+}
+
+fn forwarded_body(
+    decoded: &bidi::DecodedAppend,
+    request: &ai::BidiAppendRequest,
+    original: &Bytes,
+    headers: &mut HeaderMap,
+    changed: bool,
+) -> Result<Bytes> {
+    if !changed {
+        return Ok(original.clone());
+    }
+    let rewritten = decoded.rewritten_body(request, original)?;
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&rewritten.len().to_string()).expect("body length is a valid header"),
+    );
+    Ok(rewritten)
+}
+
+/// Resolve a Run policy candidate. Ownership and routing bind only in `admit_run_model`.
+async fn select_run_model(
+    registry: &TransportRegistry,
+    decoded: &mut bidi::DecodedAppend,
+    headers: &HeaderMap,
+) -> Result<Option<PreparedRunModel>> {
+    let Some(original) = decoded.model_id().map(str::to_owned) else {
+        return Ok(None);
+    };
+    let Some(agent::agent_client_message::Message::RunRequest(request)) =
+        decoded.message.message.as_mut()
+    else {
+        return Ok(None);
+    };
+    let Some(kind) = request
+        .subagent_type_name
+        .as_deref()
+        .filter(|kind| !kind.is_empty())
+    else {
+        return Ok(Some(PreparedRunModel {
+            original: original.clone(),
+            model: original,
+            effort: EffortAction::Unchanged,
+            role: ModelRole::Primary,
+        }));
+    };
+    let (model, effort) = if request
+        .subagent_model_overrides
+        .iter()
+        .find(|entry| entry.subagent_type == kind)
+        .is_some_and(|entry| {
+            matches!(
+                entry.selection,
+                Some(agent::subagent_model_override::Selection::Disabled(true))
+            )
+        }) {
+        // A per-type Disabled selection must not be overridden by YAML routing.
+        (original.clone(), EffortAction::Unchanged)
+    } else {
+        let snapshot = registry.subagent_models().snapshot();
+        let resolution = snapshot.resolve(kind, &original);
+        // Task.model=inherit remains Original; YAML targets never use inherit.
+        let model = if resolution.target.model == "inherit" {
+            let parent = parent_headers(headers)?.ok_or_else(|| {
+                crate::Error::Protocol("subagent model inherit requires parent headers".into())
+            })?;
+            registry
+                .run_model(&parent.request_id)
+                .await
+                .ok_or_else(|| {
+                    crate::Error::Protocol(
+                        "subagent model inherit requires an active parent model".into(),
+                    )
+                })?
+        } else {
+            resolution.target.model.clone()
+        };
+        let effort = match resolution.reason {
+            ResolutionReason::Original => EffortAction::Unchanged,
+            _ if is_composer_model(&model) => EffortAction::Clear,
+            _ => EffortAction::Set(resolution.target.effort.clone().ok_or_else(|| {
+                crate::Error::Config(format!(
+                    "subagent policy non-Composer target {model} requires effort"
+                ))
+            })?),
+        };
+        tracing::info!(
+            request_id = decoded.request_id,
+            subagent_type = kind,
+            policy_version = snapshot.version,
+            reason = ?resolution.reason,
+            original_model = original,
+            candidate_model = model,
+            candidate_effort_action = ?effort,
+            "resolved child Run model policy candidate"
+        );
+        (model, effort)
+    };
+    Ok(Some(PreparedRunModel {
+        original,
+        model,
+        effort,
+        role: ModelRole::Child,
+    }))
+}
+
+fn sync_decoded_model(
+    decoded: &mut bidi::DecodedAppend,
+    admitted: &crate::cursor::transport::AdmittedRun,
+) -> Result<()> {
+    let Some(agent::agent_client_message::Message::RunRequest(request)) =
+        decoded.message.message.as_mut()
+    else {
+        return Ok(());
+    };
+    rewrite_requested_model(
+        request,
+        &ModelRewrite {
+            model_id: admitted.model.clone(),
+            effort: admitted.effort.clone(),
+        },
+    );
+    Ok(())
+}
+
+/// Local BYOK models: plugin adapter IDs, or a hash present in `model_configs`.
+#[cfg(test)]
+async fn resolves_as_local_model(registry: &TransportRegistry, model_id: &str) -> Result<bool> {
+    if model_id.starts_with(crate::plugin::ADAPTER_ID_PREFIX) {
+        if crate::plugin::parse_model_id(model_id).is_none() {
+            return Err(crate::Error::Config(format!(
+                "invalid plugin model ID: {model_id}"
+            )));
+        }
+        return Ok(true);
+    }
+    if registry.store().model(model_id).await?.is_some() {
+        return Ok(true);
+    }
+    if model_id.len() == 16 && model_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(crate::Error::Config(format!(
+            "unknown local model hash: {model_id}"
+        )));
+    }
+    Ok(false)
 }
 
 fn trace_outcome(

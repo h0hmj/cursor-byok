@@ -174,21 +174,46 @@ async fn summarize_replaces_model_history_and_preserves_cursor_history() {
         .prompt
         .instructions
         .contains("compacting conversation history"));
-    assert_eq!(requests[1].history.len(), 3);
+    let [original_context, original_user] = requests[0].history.as_slice() else {
+        panic!("first turn must contain policy context followed by the runtime query")
+    };
+    assert!(original_context.message_id.starts_with("request-context:"));
+    assert!(original_user.message_id.starts_with("runtime:"));
+    assert!(matches!(
+        &original_context.content,
+        ProjectedContent::Parts(parts) if matches!(parts.as_slice(), [ContentPart::Text { text }]
+            if text.contains("Subagent model policy") && text.contains("\"inherit\""))
+    ));
+    let [context, user, answer, instruction] = requests[1].history.as_slice() else {
+        panic!("summarization must preserve context, query, and answer before its instruction")
+    };
+    assert_eq!(context, original_context);
+    assert_eq!(user, original_user);
+    assert!(
+        matches!(&answer.content, ProjectedContent::Assistant { text, .. } if text == "old answer")
+    );
     assert_eq!(
-        requests[1].history[2].message_id, "compaction:instruction",
+        instruction.message_id, "compaction:instruction",
         "an assistant-terminated history gets the summarize instruction as its user tail"
     );
-    assert_eq!(requests[2].history.len(), 2);
-    let ProjectedContent::Parts(summary_parts) = &requests[2].history[0].content else {
+    let [summary, reprojected_context, new_user] = requests[2].history.as_slice() else {
+        panic!("manual compaction must be followed by summary, fresh context, and runtime query")
+    };
+    assert!(reprojected_context
+        .message_id
+        .starts_with("request-context:"));
+    assert_ne!(reprojected_context.message_id, original_context.message_id);
+    assert_eq!(reprojected_context.content, original_context.content);
+    assert!(new_user.message_id.starts_with("runtime:"));
+    let ProjectedContent::Parts(summary_parts) = &summary.content else {
         panic!("first post-compaction message must be the summary")
     };
     assert!(
         matches!(summary_parts.as_slice(), [ContentPart::Text { text }]
         if text.contains("Durable summary"))
     );
-    let ProjectedContent::Parts(new_user_parts) = &requests[2].history[1].content else {
-        panic!("second post-compaction message must be the new runtime user")
+    let ProjectedContent::Parts(new_user_parts) = &new_user.content else {
+        panic!("last post-compaction message must be the new runtime user")
     };
     assert!(
         matches!(new_user_parts.as_slice(), [ContentPart::Text { text }]
@@ -295,6 +320,29 @@ async fn automatic_compaction_preflights_provider_input_and_records_rebuilt_toke
     assert!(!requests[0].prompt.tools.is_empty());
     assert!(requests[1].prompt.tools.is_empty());
     assert!(!requests[2].prompt.tools.is_empty());
+    assert_eq!(
+        requests[0].prompt.instructions,
+        requests[2].prompt.instructions
+    );
+    assert_eq!(requests[0].prompt.tools, requests[2].prompt.tools);
+    let [original_context, _] = requests[0].history.as_slice() else {
+        panic!("first turn must contain policy context and the runtime query")
+    };
+    let [retained_context, summary, current_user] = requests[2].history.as_slice() else {
+        panic!("automatic compaction must retain exactly the latest context, summary, and current query")
+    };
+    assert!(retained_context.message_id.starts_with("request-context:"));
+    assert_eq!(retained_context, original_context);
+    assert!(matches!(&summary.content, ProjectedContent::Parts(parts)
+        if matches!(parts.as_slice(), [ContentPart::Text { text }]
+            if text.contains("automatic durable summary"))));
+    assert!(current_user.message_id.starts_with("runtime:"));
+    assert!(
+        matches!(&current_user.content, ProjectedContent::Parts(parts)
+        if matches!(parts.as_slice(), [ContentPart::Text { text }]
+            if text.split_once("<user_query>").and_then(|(_, query)| query.split_once("</user_query>"))
+                .is_some_and(|(query, _)| query.trim() == "continue")))
+    );
     assert!(requests[1]
         .history
         .iter()

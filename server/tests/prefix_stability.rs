@@ -194,7 +194,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "98bb57a9ade7f1a572c5c5fe77a905a129d28ecfd42b8d318250f6486b09e1ec",
+        "87e091711c31d90e68a52b592f86cb83d8c418e607d2f3bfa30cf6d04d81601b",
     );
     assert_mode(
         &assets,
@@ -216,7 +216,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "9a7e0f9e0bd8ef0af01032fa311686f72c42ec260e3057f6fae5e68f5ed36fb8",
+        "d31373dc51d3781ee0d06e1bbc995fc95638ea90d983978b40cf3299ef83f71c",
     );
     assert_mode(
         &assets,
@@ -240,7 +240,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "98bb57a9ade7f1a572c5c5fe77a905a129d28ecfd42b8d318250f6486b09e1ec",
+        "87e091711c31d90e68a52b592f86cb83d8c418e607d2f3bfa30cf6d04d81601b",
     );
     assert_mode(
         &assets,
@@ -266,7 +266,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "976b309dd91e314d4916439ebb9da8995751d011532e39934a1da7593dc78ccb",
+        "6d21c845bb785e5aca5a4c3f581532ef978607b0f62d003156c8d97fed0608e1",
     );
     assert_mode(
         &assets,
@@ -303,7 +303,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
     );
     assert_eq!(
         schema_digest(&assets.mode(Mode::Agent).tools),
-        "282a1dff7957090d0a75eac4a46474ac7cffa1b0937bdf97354544e729bb15c2"
+        "a87fad6ee59317d9295ce218943cf0281acfc3867f4cf5c20afc77f62a63da5c"
     );
     let task = assets
         .mode(Mode::Agent)
@@ -317,6 +317,30 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
     assert!(task.description.contains(
         "If the user explicitly requests parallel subagents, follow the number requested by the user."
     ));
+    assert!(task.description.contains("latest subagent model context"));
+    assert!(task
+        .description
+        .contains("subagent type selection > model mapping > fallback"));
+    assert!(!task.description.contains("composer-2.5"));
+    assert!(!task.description.contains("cursor-grok-4.5-high"));
+    let task_model = &task.parameters["properties"]["model"];
+    assert_eq!(task_model["type"], "string");
+    assert!(task_model.get("enum").is_none());
+    assert!(task_model["description"]
+        .as_str()
+        .unwrap()
+        .contains("inherit"));
+    let task_type = &task.parameters["properties"]["subagent_type"];
+    assert_eq!(task_type["type"], "string");
+    assert!(
+        task_type.get("enum").is_none(),
+        "custom declared types must remain valid"
+    );
+    let type_description = task_type["description"].as_str().unwrap();
+    assert!(type_description.contains("custom subagent declared in the current context"));
+    assert!(
+        type_description.contains("model policy entry does not itself define a new subagent type")
+    );
     assert!(!task
         .description
         .chars()

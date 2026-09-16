@@ -84,6 +84,10 @@ The project will continue to improve model compatibility, Agent tooling, local r
 
 See the [release roadmap](https://github.com/leookun/cursor-byok/discussions/32) for plans and progress.
 
+## Subagent Model Mapping
+
+Configure default subagent models, per-type selections, and official model mappings in a hot-reloaded YAML file. See [configuration and calling examples](./docs/subagent-models.md).
+
 ## Community and Support
 
 - [User Guide](https://docs.leokun.cn)

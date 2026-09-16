@@ -6,12 +6,9 @@ use uuid::Uuid;
 use crate::{
     cursor::prompting::{Mode, PromptCompiler},
     cursor::{
-        checkpoint::messages,
-        checkpoint::CheckpointBuilder,
-        protocol::proto::agent::v1 as pb,
-        services::blob_sync::BlobSynchronizer,
-        services::context_sync::RequestContextSynchronizer,
-        tools::runtime::{ExecContext, SubagentModel},
+        checkpoint::messages, checkpoint::CheckpointBuilder, protocol::proto::agent::v1 as pb,
+        services::blob_sync::BlobSynchronizer, services::context_sync::RequestContextSynchronizer,
+        tools::runtime::ExecContext,
     },
     model::{
         CanonicalMessage, ContentPart, ConversationId, MessageContent, Origin, PreparedRun,
@@ -57,6 +54,7 @@ pub(crate) struct PrepareDependencies<'a> {
 pub(crate) async fn prepare(
     request_id: &str,
     request: &pb::AgentRunRequest,
+    subagent_model_context: &str,
     dependencies: PrepareDependencies<'_>,
 ) -> Result<(PreparedRun, CursorRunContext)> {
     let PrepareDependencies {
@@ -145,12 +143,7 @@ pub(crate) async fn prepare(
     }
     let dynamic = context::dynamic_mcp(request, &request_context)?;
     let subagent_model_overrides = model::overrides(request)?;
-    let subagents_disabled = subagent_model_overrides
-        .first()
-        .is_some_and(|(_, selection)| {
-            matches!(selection, crate::model::SubagentModelOverride::Disabled)
-        });
-    let mut checkpoint_prompt = compiler.prompt_spec(
+    let checkpoint_prompt = compiler.prompt_spec(
         checkpoint_mode,
         &model,
         &dynamic
@@ -159,9 +152,17 @@ pub(crate) async fn prepare(
             .collect::<Vec<_>>(),
         request.suppress_subagent_progress_update_tool == Some(true),
     )?;
-    if subagents_disabled {
-        checkpoint_prompt.tools.retain(|tool| tool.name != "Task");
-    }
+    let subagent_model_context = if !compacting
+        && request.subagent_type_name.is_none()
+        && checkpoint_prompt
+            .tools
+            .iter()
+            .any(|tool| tool.name == "Task")
+    {
+        subagent_model_context
+    } else {
+        ""
+    };
     let prompt = if compacting {
         compiler.prompt_spec(Mode::Compaction, &model, &[], false)?
     } else {
@@ -190,6 +191,7 @@ pub(crate) async fn prepare(
         break_messages::compile_request_context(
             "identity",
             &request_context,
+            subagent_model_context,
             base_messages.as_deref().unwrap_or_default(),
         )?
     } else {
@@ -234,6 +236,7 @@ pub(crate) async fn prepare(
                 None => break_messages::compile_request_context(
                     event_id,
                     &request_context,
+                    subagent_model_context,
                     base_messages.as_deref().unwrap_or_default(),
                 )?,
             }
@@ -325,7 +328,6 @@ pub(crate) async fn prepare(
         &request_context,
         &conversation_id,
         &model.model_id,
-        subagents_disabled,
         &subagent_model_overrides,
     );
     Ok((
@@ -580,19 +582,11 @@ fn exec_context(
     request_context: &pb::RequestContext,
     conversation_id: &ConversationId,
     model_id: &str,
-    subagents_disabled: bool,
     overrides: &[(
         crate::model::SubagentKind,
         crate::model::SubagentModelOverride,
     )],
 ) -> ExecContext {
-    let subagent_model = overrides.first().map(|(_, value)| match value {
-        crate::model::SubagentModelOverride::Explicit(model) => {
-            SubagentModel::Model(model.model_id.clone())
-        }
-        crate::model::SubagentModelOverride::Inherit => SubagentModel::Model(model_id.into()),
-        crate::model::SubagentModelOverride::Disabled => SubagentModel::Disabled,
-    });
     ExecContext {
         conversation_id: conversation_id.to_string(),
         root_conversation_id: request
@@ -600,9 +594,8 @@ fn exec_context(
             .clone()
             .unwrap_or_else(|| conversation_id.to_string()),
         default_subagent_model: model_id.into(),
-        subagent_model,
-        allow_subagents: request.subagent_type_name.is_none() && !subagents_disabled,
-        subagents_disabled,
+        overrides: overrides.to_vec(),
+        allow_subagents: request.subagent_type_name.is_none(),
         terminals_folder: request_context
             .env
             .as_ref()
@@ -610,5 +603,44 @@ fn exec_context(
             .unwrap_or_default(),
         admin_command_denylist: request_context.admin_command_denylist.clone(),
         mcp_routes: context::meta_mcp_routes(request_context),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{SubagentKind, SubagentModelOverride};
+
+    #[test]
+    fn disabled_type_keeps_parent_task_permission() {
+        let request = pb::AgentRunRequest::default();
+        let overrides = vec![(
+            SubagentKind::Named("explore".into()),
+            SubagentModelOverride::Disabled,
+        )];
+        let context = exec_context(
+            &request,
+            &pb::RequestContext::default(),
+            &ConversationId::new("parent"),
+            "sol",
+            &overrides,
+        );
+        assert!(context.allow_subagents);
+        assert_eq!(context.overrides, overrides);
+
+        let child = pb::AgentRunRequest {
+            subagent_type_name: Some("explore".into()),
+            ..Default::default()
+        };
+        assert!(
+            !exec_context(
+                &child,
+                &pb::RequestContext::default(),
+                &ConversationId::new("child"),
+                "sol",
+                &[],
+            )
+            .allow_subagents
+        );
     }
 }
