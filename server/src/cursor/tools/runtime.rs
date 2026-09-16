@@ -9,7 +9,11 @@ use std::{
 
 use tokio::sync::Mutex;
 
-use crate::{cursor::protocol::proto::agent::v1 as pb, model::ToolCall, Error, Result};
+use crate::{
+    cursor::protocol::proto::agent::v1 as pb,
+    model::{override_for, SubagentKind, SubagentModelOverride, ToolCall},
+    Error, Result,
+};
 
 use super::edit::EditWrite;
 
@@ -43,7 +47,7 @@ pub struct ExecContext {
     pub conversation_id: String,
     pub root_conversation_id: String,
     pub default_subagent_model: String,
-    pub subagent_model: Option<SubagentModel>,
+    pub overrides: Vec<(SubagentKind, SubagentModelOverride)>,
     pub allow_subagents: bool,
     pub subagents_disabled: bool,
     pub terminals_folder: String,
@@ -59,18 +63,18 @@ pub struct McpRoute {
     pub description: String,
 }
 
-#[derive(Clone, Debug)]
-pub enum SubagentModel {
-    Model(String),
-    Disabled,
-}
-
 impl ExecContext {
     pub fn task_disabled(&self, call: &ToolCall) -> bool {
         if !call.name.eq_ignore_ascii_case("Task") {
             return false;
         }
-        self.subagents_disabled || matches!(self.subagent_model, Some(SubagentModel::Disabled))
+        if self.subagents_disabled {
+            return true;
+        }
+        matches!(
+            override_for(&self.overrides, &task_subagent_kind(call)),
+            Some(SubagentModelOverride::Disabled)
+        )
     }
 
     pub fn prepare_call(&self, call: &ToolCall) -> Result<ToolCall> {
@@ -81,17 +85,20 @@ impl ExecContext {
             .arguments
             .as_object()
             .ok_or_else(|| Error::Protocol("Task arguments must be a JSON object".into()))?;
-        let subagent_type = arguments
-            .get("subagent_type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("generalPurpose");
+        let kind = task_subagent_kind(call);
+        let subagent_type = match &kind {
+            SubagentKind::GeneralPurpose => "generalPurpose",
+            SubagentKind::Named(name) => name.as_str(),
+        };
         if self.task_disabled(call) {
             return Ok(call.clone());
         }
-        let model = match &self.subagent_model {
-            Some(SubagentModel::Model(model)) => model.clone(),
-            Some(SubagentModel::Disabled) => unreachable!("disabled Task returned above"),
-            None => arguments
+        let model = match override_for(&self.overrides, &kind) {
+            Some(SubagentModelOverride::Explicit(model)) => model.model_id.clone(),
+            Some(SubagentModelOverride::Disabled) => {
+                unreachable!("disabled Task returned above")
+            }
+            Some(SubagentModelOverride::Inherit) | None => arguments
                 .get("model")
                 .and_then(serde_json::Value::as_str)
                 .filter(|model| *model != "inherit")
@@ -111,6 +118,15 @@ impl ExecContext {
             .insert("model".into(), serde_json::Value::String(model));
         Ok(prepared)
     }
+}
+
+fn task_subagent_kind(call: &ToolCall) -> SubagentKind {
+    let type_name = call
+        .arguments
+        .get("subagent_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("generalPurpose");
+    SubagentKind::from_type_name(type_name)
 }
 
 pub(crate) struct PendingInteraction {
@@ -364,4 +380,74 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ModelSpec;
+    use serde_json::json;
+
+    fn task_call(subagent_type: &str, model: &str) -> ToolCall {
+        ToolCall {
+            index: 0,
+            call_id: "call".into(),
+            model_call_id: "model:0".into(),
+            name: "Task".into(),
+            arguments_text: "{}".into(),
+            arguments: json!({
+                "subagent_type": subagent_type,
+                "model": model,
+                "description": "test",
+                "prompt": "hi",
+            }),
+            argument_error: None,
+        }
+    }
+
+    fn context_with(
+        overrides: Vec<(SubagentKind, SubagentModelOverride)>,
+    ) -> ExecContext {
+        ExecContext {
+            conversation_id: "conversation".into(),
+            root_conversation_id: "conversation".into(),
+            default_subagent_model: "sol".into(),
+            overrides,
+            allow_subagents: true,
+            subagents_disabled: false,
+            terminals_folder: String::new(),
+            admin_command_denylist: Vec::new(),
+            mcp_routes: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn prepare_call_applies_override_only_to_matching_type() {
+        let context = context_with(vec![(
+            SubagentKind::Named("explore".into()),
+            SubagentModelOverride::Explicit(ModelSpec::new("luna")),
+        )]);
+
+        let explore = context
+            .prepare_call(&task_call("explore", "inherit"))
+            .unwrap();
+        assert_eq!(explore.arguments["model"], "luna");
+
+        let general = context
+            .prepare_call(&task_call("generalPurpose", "inherit"))
+            .unwrap();
+        assert_eq!(general.arguments["model"], "sol");
+    }
+
+    #[test]
+    fn prepare_call_honors_inherit_override_for_explore() {
+        let context = context_with(vec![(
+            SubagentKind::Named("explore".into()),
+            SubagentModelOverride::Inherit,
+        )]);
+        let prepared = context
+            .prepare_call(&task_call("explore", "inherit"))
+            .unwrap();
+        assert_eq!(prepared.arguments["model"], "sol");
+    }
 }

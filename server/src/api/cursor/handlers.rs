@@ -15,6 +15,7 @@ use crate::{
         run_sse,
     },
     cursor::{
+        compile::{local_subagent_hijack_model, rewrite_requested_model},
         protocol::{
             connect,
             proto::{agent::v1 as agent, aiserver::v1 as ai},
@@ -232,21 +233,21 @@ async fn bidi_handler(
 ) -> Result<Response<Body>> {
     let (parts, body) = buffered(request).await?;
     let request: ai::BidiAppendRequest = connect::decode_unary(&body)?;
-    let decoded = bidi::decode(&request)?;
-    let first_model = decoded.model_id().map(str::to_owned);
+    let mut decoded = bidi::decode(&request)?;
     let conversation_id = decoded.conversation_id().map(str::to_owned);
-    let trace_metadata = decoded.trace_metadata();
     let trace = registry.trace(&decoded.request_id);
-    let local = if let Some(model_id) = decoded.model_id() {
+    let local = if let Some(model_id) = decoded.model_id().map(str::to_owned) {
         // 插件模型 ID 只在本地有意义,永远不转发到 Cursor 官方上游。
         if model_id.starts_with(crate::plugin::ADAPTER_ID_PREFIX)
-            || registry.store().model(model_id).await?.is_some()
+            || registry.store().model(&model_id).await?.is_some()
         {
             tracing::info!(
                 request_id = decoded.request_id,
                 model_id,
                 "routing Cursor Run to BYOK provider"
             );
+            true
+        } else if hijack_official_subagent(&registry, &mut decoded).await? {
             true
         } else {
             tracing::info!(
@@ -261,6 +262,7 @@ async fn bidi_handler(
     } else if registry.upstream(&decoded.request_id).await {
         false
     } else {
+        let trace_metadata = decoded.trace_metadata();
         trace.resume();
         trace.request(
             "bidi_request",
@@ -271,6 +273,8 @@ async fn bidi_handler(
             "first BidiAppend message must select a model".into(),
         ));
     };
+    let first_model = decoded.model_id().map(str::to_owned);
+    let trace_metadata = decoded.trace_metadata();
     if first_model.is_some() {
         trace.begin(
             conversation_id.as_deref(),
@@ -342,6 +346,34 @@ async fn bidi_handler(
         HeaderValue::from_static("application/proto"),
     );
     Ok(response)
+}
+
+async fn hijack_official_subagent(
+    registry: &TransportRegistry,
+    decoded: &mut bidi::DecodedAppend,
+) -> Result<bool> {
+    let official = decoded.model_id().map(str::to_owned);
+    let Some(agent::agent_client_message::Message::RunRequest(request)) =
+        decoded.message.message.as_mut()
+    else {
+        return Ok(false);
+    };
+    let Some(hijack) = local_subagent_hijack_model(request)? else {
+        return Ok(false);
+    };
+    if registry.store().model(&hijack.model_id).await?.is_none() {
+        return Ok(false);
+    }
+    let subagent_type = request.subagent_type_name.clone().unwrap_or_default();
+    tracing::info!(
+        request_id = decoded.request_id,
+        official = official.as_deref().unwrap_or("unknown"),
+        local = %hijack.model_id,
+        subagent_type = %subagent_type,
+        "hijacking official subagent model"
+    );
+    rewrite_requested_model(request, &hijack);
+    Ok(true)
 }
 
 fn trace_outcome(

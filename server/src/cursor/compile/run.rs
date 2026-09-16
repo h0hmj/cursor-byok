@@ -11,7 +11,7 @@ use crate::{
         protocol::proto::agent::v1 as pb,
         services::blob_sync::BlobSynchronizer,
         services::context_sync::RequestContextSynchronizer,
-        tools::runtime::{ExecContext, SubagentModel},
+        tools::runtime::ExecContext,
     },
     model::{
         CanonicalMessage, ContentPart, ConversationId, MessageContent, Origin, PreparedRun,
@@ -145,11 +145,9 @@ pub(crate) async fn prepare(
     }
     let dynamic = context::dynamic_mcp(request, &request_context)?;
     let subagent_model_overrides = model::overrides(request)?;
-    let subagents_disabled = subagent_model_overrides
-        .first()
-        .is_some_and(|(_, selection)| {
-            matches!(selection, crate::model::SubagentModelOverride::Disabled)
-        });
+    let subagents_disabled = subagent_model_overrides.iter().any(|(_, selection)| {
+        matches!(selection, crate::model::SubagentModelOverride::Disabled)
+    });
     let mut checkpoint_prompt = compiler.prompt_spec(
         checkpoint_mode,
         &model,
@@ -586,13 +584,6 @@ fn exec_context(
         crate::model::SubagentModelOverride,
     )],
 ) -> ExecContext {
-    let subagent_model = overrides.first().map(|(_, value)| match value {
-        crate::model::SubagentModelOverride::Explicit(model) => {
-            SubagentModel::Model(model.model_id.clone())
-        }
-        crate::model::SubagentModelOverride::Inherit => SubagentModel::Model(model_id.into()),
-        crate::model::SubagentModelOverride::Disabled => SubagentModel::Disabled,
-    });
     ExecContext {
         conversation_id: conversation_id.to_string(),
         root_conversation_id: request
@@ -600,7 +591,7 @@ fn exec_context(
             .clone()
             .unwrap_or_else(|| conversation_id.to_string()),
         default_subagent_model: model_id.into(),
-        subagent_model,
+        overrides: overrides.to_vec(),
         allow_subagents: request.subagent_type_name.is_none() && !subagents_disabled,
         subagents_disabled,
         terminals_folder: request_context

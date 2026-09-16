@@ -69,10 +69,62 @@ pub fn overrides(
 }
 
 pub fn subagent_kind(value: &str) -> SubagentKind {
-    if value == "generalPurpose" {
-        SubagentKind::GeneralPurpose
-    } else {
-        SubagentKind::Named(value.into())
+    SubagentKind::from_type_name(value)
+}
+
+/// Candidate local model for hijacking an official subagent Run.
+///
+/// Returns `Some` only when this is a subagent Run (`subagent_type_name` set)
+/// and that type has an `Explicit` override. The caller must still confirm the
+/// model exists in the local store before rewriting / routing.
+pub fn local_subagent_hijack_model(request: &pb::AgentRunRequest) -> Result<Option<ModelSpec>> {
+    let Some(type_name) = request
+        .subagent_type_name
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let kind = subagent_kind(type_name);
+    let overrides = overrides(request)?;
+    Ok(
+        match crate::model::override_for(&overrides, &kind) {
+            Some(SubagentModelOverride::Explicit(model)) => Some(model.clone()),
+            Some(SubagentModelOverride::Inherit | SubagentModelOverride::Disabled) | None => None,
+        },
+    )
+}
+
+/// Rewrite a RunRequest so subsequent local compile uses `model`.
+pub fn rewrite_requested_model(request: &mut pb::AgentRunRequest, model: &ModelSpec) {
+    let kind = request
+        .subagent_type_name
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(subagent_kind);
+    let from_override = kind.and_then(|kind| {
+        request.subagent_model_overrides.iter().find_map(|value| {
+            if subagent_kind(&value.subagent_type) != kind {
+                return None;
+            }
+            use pb::subagent_model_override::Selection;
+            match value.selection.as_ref()? {
+                Selection::Model(requested) if requested.model_id == model.model_id => {
+                    Some(requested.clone())
+                }
+                _ => None,
+            }
+        })
+    });
+    request.requested_model = Some(from_override.unwrap_or_else(|| pb::RequestedModel {
+        model_id: model.model_id.clone(),
+        ..Default::default()
+    }));
+    if let Some(details) = request.model_details.as_mut() {
+        details.model_id = model.model_id.clone();
+        if let Some(display_name) = &model.display_name {
+            details.display_name = display_name.clone();
+        }
     }
 }
 
@@ -139,6 +191,7 @@ fn parse_bool(parameter: &pb::requested_model::ModelParameterValue) -> Result<bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{override_for, ModelSpec, SubagentKind, SubagentModelOverride};
 
     #[test]
     fn ignores_unknown_cursor_model_parameters() {
@@ -156,5 +209,120 @@ mod tests {
         assert_eq!(model.model_id, "test-model");
         assert_eq!(model.latency, ModelLatency::Standard);
         assert!(!model.reasoning.enabled);
+    }
+
+    fn explore_override(model_id: &str) -> pb::SubagentModelOverride {
+        pb::SubagentModelOverride {
+            subagent_type: "explore".into(),
+            selection: Some(pb::subagent_model_override::Selection::Model(
+                pb::RequestedModel {
+                    model_id: model_id.into(),
+                    parameters: vec![pb::requested_model::ModelParameterValue {
+                        id: "reasoning".into(),
+                        value: "medium".into(),
+                    }],
+                    ..Default::default()
+                },
+            )),
+        }
+    }
+
+    fn inherit_override(subagent_type: &str) -> pb::SubagentModelOverride {
+        pb::SubagentModelOverride {
+            subagent_type: subagent_type.into(),
+            selection: Some(pb::subagent_model_override::Selection::Inherit(true)),
+        }
+    }
+
+    #[test]
+    fn override_for_matches_named_kind() {
+        let overrides = vec![
+            (
+                SubagentKind::Named("explore".into()),
+                SubagentModelOverride::Explicit(ModelSpec::new("luna")),
+            ),
+            (
+                SubagentKind::GeneralPurpose,
+                SubagentModelOverride::Inherit,
+            ),
+        ];
+        assert!(matches!(
+            override_for(&overrides, &SubagentKind::Named("explore".into())),
+            Some(SubagentModelOverride::Explicit(model)) if model.model_id == "luna"
+        ));
+        assert!(matches!(
+            override_for(&overrides, &SubagentKind::GeneralPurpose),
+            Some(SubagentModelOverride::Inherit)
+        ));
+        assert!(override_for(&overrides, &SubagentKind::Named("shell".into())).is_none());
+    }
+
+    #[test]
+    fn hijack_requires_subagent_type_and_explicit_local_override() {
+        let mut request = pb::AgentRunRequest {
+            requested_model: Some(pb::RequestedModel {
+                model_id: "composer-2.5".into(),
+                ..Default::default()
+            }),
+            subagent_model_overrides: vec![explore_override("luna-hash")],
+            ..Default::default()
+        };
+        assert!(local_subagent_hijack_model(&request)
+            .unwrap()
+            .is_none());
+
+        request.subagent_type_name = Some("explore".into());
+        let hijack = local_subagent_hijack_model(&request)
+            .unwrap()
+            .expect("explore + explicit should hijack");
+        assert_eq!(hijack.model_id, "luna-hash");
+        assert_eq!(hijack.reasoning.effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn hijack_skips_inherit_override() {
+        let request = pb::AgentRunRequest {
+            requested_model: Some(pb::RequestedModel {
+                model_id: "composer-2.5".into(),
+                ..Default::default()
+            }),
+            subagent_type_name: Some("explore".into()),
+            subagent_model_overrides: vec![inherit_override("explore")],
+            ..Default::default()
+        };
+        assert!(local_subagent_hijack_model(&request)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn rewrite_requested_model_copies_override_parameters() {
+        let mut request = pb::AgentRunRequest {
+            requested_model: Some(pb::RequestedModel {
+                model_id: "composer-2.5".into(),
+                ..Default::default()
+            }),
+            model_details: Some(pb::ModelDetails {
+                model_id: "composer-2.5".into(),
+                display_name: "Composer".into(),
+                ..Default::default()
+            }),
+            subagent_type_name: Some("explore".into()),
+            subagent_model_overrides: vec![explore_override("luna-hash")],
+            ..Default::default()
+        };
+        let model = local_subagent_hijack_model(&request).unwrap().unwrap();
+        rewrite_requested_model(&mut request, &model);
+        let requested = request.requested_model.as_ref().unwrap();
+        assert_eq!(requested.model_id, "luna-hash");
+        assert_eq!(
+            requested
+                .parameters
+                .iter()
+                .find(|parameter| parameter.id == "reasoning")
+                .map(|parameter| parameter.value.as_str()),
+            Some("medium")
+        );
+        assert_eq!(request.model_details.as_ref().unwrap().model_id, "luna-hash");
     }
 }
