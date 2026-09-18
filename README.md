@@ -80,7 +80,7 @@ cursor-byok is built to return model choice to the user. Developers can make ful
 
 ## Agent CLI Startup Metadata
 
-When this setting is on, team admin settings, marketplaces, managed skills, global commands, effective plugins, and privacy mode all return immediately. A missing cache is an empty response plus a background refresh for that endpoint; later requests in the same process return the last successful payload for that endpoint, with no expiry. Model catalogs still merge local BYOK models, and account identity (`GetMe`) still follows the supplied token.
+When this setting is on, team admin settings, marketplaces, managed skills, global commands, effective plugins, and privacy mode all return immediately. A missing cache is an empty response plus a background refresh for that endpoint; later requests in the same process return the last successful payload for that endpoint, with no expiry. Model catalogs still merge the upstream catalog with the current local BYOK models. The upstream catalog is stored on disk like `GetMe`, keyed by a hash of the token (not the token itself) and by endpoint. A hit returns immediately and refreshes in the background; a miss waits for upstream and then stores the successful body. `GetMe` uses the same hit and miss behavior, keyed only by the token hash.
 
 To disable the local metadata fast path without rebuilding:
 

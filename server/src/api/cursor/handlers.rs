@@ -45,7 +45,6 @@ fn router_with_proxy(
 ) -> Router {
     let web_cache = registry.web_cache().router();
     let free_entitlements = FreeEntitlementCache::default();
-    let catalog_cache = model_catalog::UpstreamCatalogCache::default();
     Router::new()
         .route("/__byok-api__/healthz", get(health))
         .route("/agent.v1.AgentService/RunSSE", post(run_sse_handler))
@@ -181,7 +180,6 @@ fn router_with_proxy(
         .layer(Extension(proxy))
         .layer(Extension(knowledge_service))
         .layer(Extension(free_entitlements))
-        .layer(Extension(catalog_cache))
         .with_state(registry)
         .merge(web_cache)
 }

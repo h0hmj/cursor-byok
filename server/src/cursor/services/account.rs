@@ -181,8 +181,9 @@ pub async fn get_me(
     Extension(upstream): Extension<proxy::CursorProxy>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
-    local_or_forward(upstream, request, || {
-        proto(GetMeResponse {
+    if local_app::request_uses_local_cursor_token(request.headers()) {
+        consume_body(request).await?;
+        return proto(GetMeResponse {
             auth_id: LOCAL_AUTH_ID.into(),
             user_id: 1,
             email: Some(LOCAL_EMAIL.into()),
@@ -193,9 +194,9 @@ pub async fn get_me(
             email_domain_type: Some("personal".into()),
             country: Some("US".into()),
             profile_picture_url: None,
-        })
-    })
-    .await
+        });
+    }
+    super::get_me_cache::serve(upstream, request).await
 }
 
 pub async fn get_teams(
