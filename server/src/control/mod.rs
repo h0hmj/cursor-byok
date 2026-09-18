@@ -22,8 +22,9 @@ use tower_http::{
 use url::{Host, Url};
 
 pub use service::{
-    CallDetail, CallSummary, ControlService, DiscoveredModels, LegacyModelImportPreview,
-    LegacyModelImportResult, ModelConnectivityResult, ModelDiscoveryInput, ObservabilitySettings,
+    CallDetail, CallSummary, CliStartupSettings, ControlService, DiscoveredModels,
+    LegacyModelImportPreview, LegacyModelImportResult, ModelConnectivityResult,
+    ModelDiscoveryInput, ObservabilitySettings,
 };
 
 pub fn web_router(service: ControlService, assets: impl AsRef<std::path::Path>) -> Router {
@@ -191,6 +192,10 @@ pub fn api_router(service: ControlService) -> Router {
         .route(
             "/__byok-api__/api/settings/observability",
             get(settings::get).put(settings::update),
+        )
+        .route(
+            "/__byok-api__/api/settings/cli-startup",
+            get(settings::get_cli_startup).put(settings::update_cli_startup),
         )
         .route(
             "/__byok-api__/api/settings/ports",

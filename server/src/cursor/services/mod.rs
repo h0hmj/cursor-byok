@@ -10,6 +10,8 @@ pub(crate) mod entitlement;
 pub mod knowledge;
 pub mod model_catalog;
 pub mod observability;
+pub mod plugin_catalog;
 pub mod server_config;
+pub mod startup_timing;
 pub mod tab;
 pub mod usage;

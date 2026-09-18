@@ -7,7 +7,10 @@ use axum::{
     http::{header, Request, Response},
 };
 
-use crate::Result;
+use crate::{
+    cursor::services::startup_timing::{self, MetadataSource},
+    Result,
+};
 
 const CURSOR_UPSTREAM: &str = "https://api2.cursor.sh";
 pub const UPSTREAM_URL_HEADER: &str = "x-server-upstream-url";
@@ -106,12 +109,21 @@ async fn forward_request(
     let upstream = match upstream {
         Ok(response) => response,
         Err(error) => {
+            let elapsed = started.elapsed();
             tracing::error!(
                 method = %parts.method,
                 path,
-                elapsed_ms = started.elapsed().as_millis(),
+                elapsed_ms = elapsed.as_millis(),
                 %error,
                 "Cursor upstream request failed"
+            );
+            startup_timing::log_metadata(
+                &path,
+                MetadataSource::Upstream,
+                elapsed,
+                Some(elapsed),
+                None,
+                None,
             );
             return Err(error.into());
         }
@@ -124,12 +136,21 @@ async fn forward_request(
     *response.status_mut() = status;
     *response.headers_mut() = response_headers;
 
+    let elapsed = started.elapsed();
     tracing::info!(
         method = %parts.method,
         path,
         %status,
-        elapsed_ms = started.elapsed().as_millis(),
+        elapsed_ms = elapsed.as_millis(),
         "forwarded Cursor backend request"
+    );
+    startup_timing::log_metadata(
+        &path,
+        MetadataSource::Upstream,
+        elapsed,
+        Some(elapsed),
+        None,
+        None,
     );
     Ok(response)
 }

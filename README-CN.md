@@ -90,6 +90,20 @@ Cursor 的 Tab 补全由独立的 TAB 服务处理，不经过模型通道。你
 
 修改 TAB 设置后，建议重启 Cursor 并新开一个对话，确保新的连接方式生效。
 
+## Agent CLI 启动元数据
+
+开关开启时，团队管理设置、Marketplace、托管 Skills、全局 Commands、已启用插件和隐私模式都会立刻返回：没有缓存时先回空，并在后台按接口刷新；之后同一进程内一直返回该接口上次成功的结果，不过期。模型目录仍会合并本地 BYOK 模型；账号身份（`GetMe`）仍按实际 token 处理。
+
+如需关闭该本地快路径（无需重新编译）：
+
+```sh
+curl -sS -X PUT "http://127.0.0.1:<service-port>/__byok-api__/api/settings/cli-startup" \
+  -H 'content-type: application/json' \
+  -d '{"local_metadata":false}'
+```
+
+将 `"local_metadata":true` 写回即可重新启用（默认开启）。关闭后，官方 token 的这些 RPC 会重新转发上游。
+
 ## 与官方账号并存
 
 新版设计支持 cursor-byok 与 Cursor 官方服务并存：

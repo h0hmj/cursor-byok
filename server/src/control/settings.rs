@@ -13,7 +13,7 @@ use crate::store::{
     TokenPricingSettings,
 };
 
-use super::{ControlService, ObservabilitySettings};
+use super::{CliStartupSettings, ControlService, ObservabilitySettings};
 
 pub async fn get(State(service): State<ControlService>) -> Result<Json<ObservabilitySettings>> {
     Ok(Json(service.observability().await?))
@@ -24,6 +24,19 @@ pub async fn update(
     Json(settings): Json<ObservabilitySettings>,
 ) -> Result<Json<ObservabilitySettings>> {
     Ok(Json(service.set_observability(settings).await?))
+}
+
+pub async fn get_cli_startup(
+    State(service): State<ControlService>,
+) -> Result<Json<CliStartupSettings>> {
+    Ok(Json(service.cli_startup().await?))
+}
+
+pub async fn update_cli_startup(
+    State(service): State<ControlService>,
+    Json(settings): Json<CliStartupSettings>,
+) -> Result<Json<CliStartupSettings>> {
+    Ok(Json(service.set_cli_startup(settings).await?))
 }
 
 pub async fn get_ports(State(service): State<ControlService>) -> Result<Json<PortSettings>> {

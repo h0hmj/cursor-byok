@@ -78,6 +78,20 @@ Many Agent products bundle their tool capabilities with a fixed set of models, s
 
 cursor-byok is built to return model choice to the user. Developers can make full use of the APIs and credits they already have, choose the models and providers that fit their needs, and self-host related services when required.
 
+## Agent CLI Startup Metadata
+
+When this setting is on, team admin settings, marketplaces, managed skills, global commands, effective plugins, and privacy mode all return immediately. A missing cache is an empty response plus a background refresh for that endpoint; later requests in the same process return the last successful payload for that endpoint, with no expiry. Model catalogs still merge local BYOK models, and account identity (`GetMe`) still follows the supplied token.
+
+To disable the local metadata fast path without rebuilding:
+
+```sh
+curl -sS -X PUT "http://127.0.0.1:<service-port>/__byok-api__/api/settings/cli-startup" \
+  -H 'content-type: application/json' \
+  -d '{"local_metadata":false}'
+```
+
+Re-enable with `"local_metadata":true` (the default). Turning it off forwards these RPCs upstream again for official tokens.
+
 ## Roadmap
 
 The project will continue to improve model compatibility, Agent tooling, local runtime stability, and the self-hosting experience while exploring support for more IDE, chat, and Agent workflows.

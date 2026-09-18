@@ -147,6 +147,11 @@ pub struct ObservabilitySettings {
     pub detailed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CliStartupSettings {
+    pub local_metadata: bool,
+}
+
 impl ControlService {
     pub fn new(
         store: Store,
@@ -684,6 +689,22 @@ impl ControlService {
         settings: ObservabilitySettings,
     ) -> Result<ObservabilitySettings> {
         self.store.set_detailed_logging(settings.detailed).await?;
+        Ok(settings)
+    }
+
+    pub async fn cli_startup(&self) -> Result<CliStartupSettings> {
+        Ok(CliStartupSettings {
+            local_metadata: self.store.cli_startup_local_metadata().await?,
+        })
+    }
+
+    pub async fn set_cli_startup(
+        &self,
+        settings: CliStartupSettings,
+    ) -> Result<CliStartupSettings> {
+        self.store
+            .set_cli_startup_local_metadata(settings.local_metadata)
+            .await?;
         Ok(settings)
     }
 

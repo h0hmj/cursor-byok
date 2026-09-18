@@ -22,7 +22,7 @@ use crate::{
         },
         services::{
             account, analytics, commit_message, compatibility, entitlement::FreeEntitlementCache,
-            knowledge, model_catalog, server_config, tab,
+            knowledge, model_catalog, plugin_catalog, server_config, tab,
         },
         transport::{TransportParent, TransportRegistry},
     },
@@ -45,6 +45,7 @@ fn router_with_proxy(
 ) -> Router {
     let web_cache = registry.web_cache().router();
     let free_entitlements = FreeEntitlementCache::default();
+    let catalog_cache = model_catalog::UpstreamCatalogCache::default();
     Router::new()
         .route("/__byok-api__/healthz", get(health))
         .route("/agent.v1.AgentService/RunSSE", post(run_sse_handler))
@@ -55,11 +56,27 @@ fn router_with_proxy(
         )
         .route(
             "/aiserver.v1.DashboardService/GetEffectiveUserPlugins",
-            post(compatibility::effective_user_plugins),
+            post(plugin_catalog::serve),
         )
         .route(
             "/aiserver.v1.DashboardService/GetUserPrivacyMode",
-            post(compatibility::user_privacy_mode),
+            post(plugin_catalog::serve),
+        )
+        .route(
+            "/aiserver.v1.DashboardService/GetTeamAdminSettingsOrEmptyIfNotInTeam",
+            post(plugin_catalog::serve),
+        )
+        .route(
+            "/aiserver.v1.DashboardService/ListMarketplaces",
+            post(plugin_catalog::serve),
+        )
+        .route(
+            "/aiserver.v1.DashboardService/GetManagedSkills",
+            post(plugin_catalog::serve),
+        )
+        .route(
+            "/aiserver.v1.DashboardService/GetGlobalCommands",
+            post(plugin_catalog::serve),
         )
         .route(
             "/agent.v1.AgentService/UpdateConversationMetadata",
@@ -164,6 +181,7 @@ fn router_with_proxy(
         .layer(Extension(proxy))
         .layer(Extension(knowledge_service))
         .layer(Extension(free_entitlements))
+        .layer(Extension(catalog_cache))
         .with_state(registry)
         .merge(web_cache)
 }

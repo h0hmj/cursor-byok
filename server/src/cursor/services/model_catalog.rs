@@ -1,19 +1,115 @@
 //! Publishes the configured model catalog to Cursor.
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
 use axum::{
-    body::{Body, Bytes},
+    body::{to_bytes, Body, Bytes},
     extract::{Extension, State},
-    http::{header, HeaderValue, Request, Response, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode},
 };
 use bytes::{BufMut, BytesMut};
+use parking_lot::Mutex;
 use prost::Message;
+use sha2::{Digest, Sha256};
 
 use crate::{
     api::cursor::proxy::{self, CursorProxy},
-    cursor::{protocol::proto::agent::v1 as agent, transport::TransportRegistry},
+    cursor::{
+        protocol::proto::agent::v1 as agent,
+        services::startup_timing::{self, MetadataSource},
+        transport::TransportRegistry,
+    },
     model::{format_token_count, parse_token_count, ModelConfig},
     plugin::PluginModelDescriptor,
     Error, Result,
 };
+
+const UPSTREAM_CATALOG_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Short-lived in-memory cache of successful upstream model-catalog payloads.
+#[derive(Clone, Default)]
+pub struct UpstreamCatalogCache {
+    entries: Arc<Mutex<HashMap<CatalogCacheKey, CatalogCacheEntry>>>,
+}
+
+#[derive(Clone, Eq, PartialEq, Hash)]
+struct CatalogCacheKey {
+    path: String,
+    token_hash: [u8; 32],
+}
+
+struct CatalogCacheEntry {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Bytes,
+    stored_at: Instant,
+}
+
+impl UpstreamCatalogCache {
+    fn get(&self, path: &str, headers: &HeaderMap) -> Option<(proxy::BufferedResponse, Duration)> {
+        let key = cache_key(path, headers)?;
+        let now = Instant::now();
+        let mut entries = self.entries.lock();
+        match entries.get(&key) {
+            Some(entry) if now.duration_since(entry.stored_at) < UPSTREAM_CATALOG_TTL => {
+                let age = now.duration_since(entry.stored_at);
+                Some((
+                    proxy::BufferedResponse {
+                        status: entry.status,
+                        headers: entry.headers.clone(),
+                        body: entry.body.clone(),
+                    },
+                    age,
+                ))
+            }
+            Some(_) => {
+                entries.remove(&key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn put(&self, path: &str, headers: &HeaderMap, upstream: &proxy::BufferedResponse) {
+        let Some(key) = cache_key(path, headers) else {
+            return;
+        };
+        if !upstream.status.is_success() {
+            return;
+        }
+        self.entries.lock().insert(
+            key,
+            CatalogCacheEntry {
+                status: upstream.status,
+                headers: upstream.headers.clone(),
+                body: upstream.body.clone(),
+                stored_at: Instant::now(),
+            },
+        );
+    }
+}
+
+fn cache_key(path: &str, headers: &HeaderMap) -> Option<CatalogCacheKey> {
+    Some(CatalogCacheKey {
+        path: path.to_owned(),
+        token_hash: authorization_token_hash(headers)?,
+    })
+}
+
+fn authorization_token_hash(headers: &HeaderMap) -> Option<[u8; 32]> {
+    let token = headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")?;
+    if token.is_empty() {
+        return None;
+    }
+    Some(Sha256::digest(token.as_bytes()).into())
+}
 
 #[derive(Clone, PartialEq, Message)]
 struct AvailableModelsAddition {
@@ -249,6 +345,7 @@ fn context_options(context_window_tokens: Option<u64>) -> Vec<(String, String)> 
 pub async fn available_models(
     State(registry): State<TransportRegistry>,
     Extension(proxy): Extension<CursorProxy>,
+    Extension(catalog_cache): Extension<UpstreamCatalogCache>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
     let models = registry.store().models().await?;
@@ -272,18 +369,13 @@ pub async fn available_models(
         models: available_models,
     }
     .encode_to_vec();
-    match proxy::forward_buffered(&proxy, request).await {
-        Ok(upstream) => merge_response(upstream, local),
-        Err(error) => {
-            tracing::warn!(%error, "Cursor AvailableModels upstream unavailable; using local catalog");
-            Ok(local_response(local))
-        }
-    }
+    merge_with_upstream_catalog(proxy, catalog_cache, request, local).await
 }
 
 pub async fn usable_models(
     State(registry): State<TransportRegistry>,
     Extension(proxy): Extension<CursorProxy>,
+    Extension(catalog_cache): Extension<UpstreamCatalogCache>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
     let models = registry.store().models().await?;
@@ -304,13 +396,69 @@ pub async fn usable_models(
             .collect(),
     }
     .encode_to_vec();
+    merge_with_upstream_catalog(proxy, catalog_cache, request, local).await
+}
+
+async fn merge_with_upstream_catalog(
+    proxy: CursorProxy,
+    catalog_cache: UpstreamCatalogCache,
+    request: Request<Body>,
+    local: Vec<u8>,
+) -> Result<Response<Body>> {
+    let started = Instant::now();
+    let path = request.uri().path().to_owned();
+    let headers = request.headers().clone();
+
+    if let Some((upstream, age)) = catalog_cache.get(&path, &headers) {
+        consume_body(request).await?;
+        let response = merge_response(upstream, local)?;
+        startup_timing::log_metadata(
+            &path,
+            MetadataSource::Merged,
+            started.elapsed(),
+            None,
+            Some(true),
+            Some(age),
+        );
+        return Ok(response);
+    }
+
+    let upstream_started = Instant::now();
     match proxy::forward_buffered(&proxy, request).await {
-        Ok(upstream) => merge_response(upstream, local),
+        Ok(upstream) => {
+            let upstream_ms = upstream_started.elapsed();
+            catalog_cache.put(&path, &headers, &upstream);
+            let response = merge_response(upstream, local)?;
+            startup_timing::log_metadata(
+                &path,
+                MetadataSource::Merged,
+                started.elapsed(),
+                Some(upstream_ms),
+                Some(false),
+                None,
+            );
+            Ok(response)
+        }
         Err(error) => {
-            tracing::warn!(%error, "Cursor GetUsableModels upstream unavailable; using local catalog");
+            tracing::warn!(%error, path = %path, "Cursor model catalog upstream unavailable; using local catalog");
+            startup_timing::log_metadata(
+                &path,
+                MetadataSource::Local,
+                started.elapsed(),
+                Some(upstream_started.elapsed()),
+                Some(false),
+                None,
+            );
             Ok(local_response(local))
         }
     }
+}
+
+async fn consume_body(request: Request<Body>) -> Result<()> {
+    to_bytes(request.into_body(), usize::MAX)
+        .await
+        .map_err(|error| crate::Error::Protocol(format!("cannot read request body: {error}")))?;
+    Ok(())
 }
 
 pub async fn default_model_for_cli(
@@ -858,5 +1006,53 @@ mod tests {
             nudge.models_with_no_default_switch,
             vec!["local-model-hash"]
         );
+    }
+
+    fn auth_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    fn buffered(body: &'static [u8]) -> proxy::BufferedResponse {
+        proxy::BufferedResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(body),
+        }
+    }
+
+    #[test]
+    fn upstream_catalog_cache_hits_within_ttl_and_isolates_tokens() {
+        let cache = UpstreamCatalogCache::default();
+        let path = "/aiserver.v1.AiService/AvailableModels";
+        let headers_a = auth_headers("token-a");
+        let headers_b = auth_headers("token-b");
+        let upstream = buffered(b"upstream-catalog");
+
+        assert!(cache.get(path, &headers_a).is_none());
+        cache.put(path, &headers_a, &upstream);
+
+        let (hit, age) = cache.get(path, &headers_a).expect("cache hit");
+        assert_eq!(hit.body.as_ref(), b"upstream-catalog");
+        assert!(age < UPSTREAM_CATALOG_TTL);
+        assert!(cache.get(path, &headers_b).is_none());
+    }
+
+    #[test]
+    fn upstream_catalog_cache_skips_unsuccessful_responses() {
+        let cache = UpstreamCatalogCache::default();
+        let path = "/agent.v1.AgentService/GetUsableModels";
+        let headers = auth_headers("token");
+        let upstream = proxy::BufferedResponse {
+            status: StatusCode::BAD_GATEWAY,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"error"),
+        };
+        cache.put(path, &headers, &upstream);
+        assert!(cache.get(path, &headers).is_none());
     }
 }

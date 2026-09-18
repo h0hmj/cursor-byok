@@ -1,4 +1,6 @@
 //! Routes Cursor metadata calls according to the supplied authentication token.
+use std::time::Instant;
+
 use axum::{
     body::{to_bytes, Body},
     extract::{Extension, Request},
@@ -8,7 +10,10 @@ use prost::Message;
 
 use crate::{
     api::cursor::proxy::{self, CursorProxy},
-    cursor::protocol::proto::agent::v1 as agent,
+    cursor::{
+        protocol::proto::agent::v1 as agent,
+        services::startup_timing::{self, MetadataSource},
+    },
     local_app, Result,
 };
 
@@ -16,20 +21,6 @@ use crate::{
 struct EmptyResponse {}
 
 pub async fn available_docs(
-    Extension(proxy): Extension<CursorProxy>,
-    request: Request<Body>,
-) -> Result<Response<Body>> {
-    route(&proxy, request, EmptyResponse {}).await
-}
-
-pub async fn effective_user_plugins(
-    Extension(proxy): Extension<CursorProxy>,
-    request: Request<Body>,
-) -> Result<Response<Body>> {
-    route(&proxy, request, EmptyResponse {}).await
-}
-
-pub async fn user_privacy_mode(
     Extension(proxy): Extension<CursorProxy>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
@@ -53,10 +44,21 @@ async fn route<M: Message>(
     request: Request<Body>,
     mock: M,
 ) -> Result<Response<Body>> {
+    let started = Instant::now();
+    let path = request.uri().path().to_owned();
     let local = local_app::request_uses_local_cursor_token(request.headers());
     if local {
         consume_body(request).await?;
-        return Ok(proto(mock));
+        let response = proto(mock);
+        startup_timing::log_metadata(
+            &path,
+            MetadataSource::Local,
+            started.elapsed(),
+            None,
+            None,
+            None,
+        );
+        return Ok(response);
     }
     proxy::forward(Extension(proxy.clone()), request).await
 }
