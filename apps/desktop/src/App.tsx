@@ -12,9 +12,6 @@ import { HomePage } from "./features/home/HomePage";
 import { PluginManagementPage } from "./features/plugins/PluginManagementPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { useAppStore } from "./shared/store/appStore";
-import { updateStore } from "./shared/store/updateStore";
-
-const AUTO_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 
 export function App() {
   return (
@@ -42,46 +39,12 @@ export function App() {
 function AppMessages() {
   const { error } = useAppStore();
   const previousError = useRef<string | null>(null);
-  const lastAutomaticUpdateCheckAt = useRef(0);
   const showMessage = useMessage();
 
   useEffect(() => {
     if (error && error !== previousError.current) showMessage(error);
     previousError.current = error;
   }, [error, showMessage]);
-
-  useEffect(() => {
-    let disposed = false;
-    const checkAutomatically = () => {
-      const now = Date.now();
-      if (now - lastAutomaticUpdateCheckAt.current < AUTO_UPDATE_CHECK_INTERVAL_MS) return;
-      lastAutomaticUpdateCheckAt.current = now;
-      const previousVersion = updateStore.getSnapshot().availableVersion;
-      void updateStore.check().then((version) => {
-        if (disposed || !version || version === previousVersion) return;
-        showMessage(t("发现新版本 {version}，可在设置中安装", { version }), { duration: 6_000 });
-      }).catch(() => {
-        if (!disposed) lastAutomaticUpdateCheckAt.current = 0;
-        // Automatic checks are best-effort; manual checks in Settings report errors.
-      });
-    };
-    const checkWhenVisible = () => {
-      if (document.visibilityState === "visible") checkAutomatically();
-    };
-
-    checkAutomatically();
-    window.addEventListener("focus", checkAutomatically);
-    window.addEventListener("online", checkAutomatically);
-    document.addEventListener("visibilitychange", checkWhenVisible);
-    const timer = window.setInterval(checkAutomatically, AUTO_UPDATE_CHECK_INTERVAL_MS);
-    return () => {
-      disposed = true;
-      window.removeEventListener("focus", checkAutomatically);
-      window.removeEventListener("online", checkAutomatically);
-      document.removeEventListener("visibilitychange", checkWhenVisible);
-      window.clearInterval(timer);
-    };
-  }, [showMessage]);
 
   return <MessageProvider />;
 }

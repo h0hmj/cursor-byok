@@ -116,7 +116,7 @@
         },
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 176,
+          "line": 178,
           "column": 10
         },
         {
@@ -148,7 +148,7 @@
       "refs": [
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 223,
+          "line": 225,
           "column": 23
         }
       ]
@@ -655,18 +655,6 @@
         }
       ]
     },
-    "19658d9fa9aa8de4": {
-      "source": "安装中…",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 158,
-          "column": 27
-        }
-      ]
-    },
     "19bb071f8c362695": {
       "source": "提示词设置",
       "kind": "text",
@@ -674,12 +662,12 @@
       "refs": [
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 173,
+          "line": 175,
           "column": 10
         },
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 205,
+          "line": 207,
           "column": 16
         }
       ]
@@ -952,20 +940,6 @@
         }
       ]
     },
-    "23e49479e15e6770": {
-      "source": "发现新版本 {version}",
-      "kind": "template",
-      "placeholders": [
-        "version"
-      ],
-      "refs": [
-        {
-          "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 96,
-          "column": 29
-        }
-      ]
-    },
     "2400fbd0aeab9e13": {
       "source": "已下载 {downloaded}",
       "kind": "template",
@@ -1004,20 +978,6 @@
         }
       ]
     },
-    "29585d7193539200": {
-      "source": "当前版本 {version}",
-      "kind": "template",
-      "placeholders": [
-        "version"
-      ],
-      "refs": [
-        {
-          "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 154,
-          "column": 13
-        }
-      ]
-    },
     "296da37506328d89": {
       "source": "关闭接管Cursor",
       "kind": "text",
@@ -1027,18 +987,6 @@
           "file": "features/models/CursorSettingsPage.tsx",
           "line": 48,
           "column": 43
-        }
-      ]
-    },
-    "29fbbef32a6eb58b": {
-      "source": "不再显示此广告",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 248,
-          "column": 14
         }
       ]
     },
@@ -1115,12 +1063,12 @@
         },
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 165,
+          "line": 167,
           "column": 78
         },
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 212,
+          "line": 214,
           "column": 21
         },
         {
@@ -1160,12 +1108,7 @@
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 238,
-          "column": 20
-        },
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 249,
+          "line": 115,
           "column": 20
         }
       ]
@@ -1282,7 +1225,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 237,
+          "line": 114,
           "column": 14
         }
       ]
@@ -1410,11 +1353,6 @@
           "file": "shared/ui/ConfirmDialog.tsx",
           "line": 4,
           "column": 110
-        },
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 250,
-          "column": 21
         }
       ]
     },
@@ -1592,7 +1530,7 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 85,
+          "line": 79,
           "column": 45
         }
       ]
@@ -1637,18 +1575,6 @@
           "file": "features/settings/SettingsPage.tsx",
           "line": 257,
           "column": 26
-        }
-      ]
-    },
-    "3da0bf1610ff5db5": {
-      "source": "推荐内容",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/ads/AdMenu.tsx",
-          "line": 62,
-          "column": 56
         }
       ]
     },
@@ -1839,7 +1765,7 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 128,
+          "line": 103,
           "column": 17
         }
       ]
@@ -1882,20 +1808,6 @@
         }
       ]
     },
-    "492042ed1fdc29ed": {
-      "source": "版本 {version} 可以安装",
-      "kind": "template",
-      "placeholders": [
-        "version"
-      ],
-      "refs": [
-        {
-          "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 153,
-          "column": 13
-        }
-      ]
-    },
     "4927a53bcc886afb": {
       "source": "加载中…",
       "kind": "text",
@@ -1903,7 +1815,7 @@
       "refs": [
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 162,
+          "line": 164,
           "column": 8
         },
         {
@@ -2033,13 +1945,8 @@
       "placeholders": [],
       "refs": [
         {
-          "file": "shell/ads/AdMenu.tsx",
-          "line": 72,
-          "column": 99
-        },
-        {
           "file": "shell/AppLayout.tsx",
-          "line": 204,
+          "line": 84,
           "column": 67
         }
       ]
@@ -2155,7 +2062,7 @@
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 224,
+          "line": 104,
           "column": 51
         }
       ]
@@ -2225,18 +2132,6 @@
         }
       ]
     },
-    "550eddc3c7fefa99": {
-      "source": "推广",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/ads/FloatingAd.tsx",
-          "line": 63,
-          "column": 48
-        }
-      ]
-    },
     "552a5d4baf45d878": {
       "source": "Commit 提交代码模型设置",
       "kind": "text",
@@ -2244,7 +2139,7 @@
       "refs": [
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 183,
+          "line": 185,
           "column": 26
         }
       ]
@@ -2453,20 +2348,8 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 59,
+          "line": 53,
           "column": 40
-        }
-      ]
-    },
-    "5f9acfb945229062": {
-      "source": "你确认不想再看到此广告吗？",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 254,
-          "column": 11
         }
       ]
     },
@@ -2649,20 +2532,8 @@
       "refs": [
         {
           "file": "shared/api.ts",
-          "line": 528,
+          "line": 517,
           "column": 43
-        }
-      ]
-    },
-    "651f274470153a05": {
-      "source": "软件更新",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 151,
-          "column": 18
         }
       ]
     },
@@ -2759,12 +2630,12 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 139,
+          "line": 114,
           "column": 18
         },
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 145,
+          "line": 120,
           "column": 16
         }
       ]
@@ -2800,7 +2671,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 80,
+          "line": 50,
           "column": 47
         }
       ]
@@ -2875,18 +2746,6 @@
           "file": "features/settings/ProxySettingsCard.tsx",
           "line": 69,
           "column": 46
-        }
-      ]
-    },
-    "6e86570183c3cdd0": {
-      "source": "当前已是最新版本",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 96,
-          "column": 78
         }
       ]
     },
@@ -2988,7 +2847,7 @@
       "refs": [
         {
           "file": "shared/api.ts",
-          "line": 523,
+          "line": 512,
           "column": 43
         }
       ]
@@ -3046,20 +2905,6 @@
         }
       ]
     },
-    "7d9f043f8f7ab45c": {
-      "source": "发现新版本 {version}，可在设置中安装",
-      "kind": "template",
-      "placeholders": [
-        "version"
-      ],
-      "refs": [
-        {
-          "file": "App.tsx",
-          "line": 62,
-          "column": 21
-        }
-      ]
-    },
     "7e0891860c9e6374": {
       "source": "TAB 服务地址不能为空",
       "kind": "text",
@@ -3093,18 +2938,6 @@
           "file": "features/models/CursorGates.tsx",
           "line": 22,
           "column": 121
-        }
-      ]
-    },
-    "7f68ebad19ba6bcd": {
-      "source": "检查更新",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 162,
-          "column": 37
         }
       ]
     },
@@ -3142,7 +2975,7 @@
       "refs": [
         {
           "file": "shared/api.ts",
-          "line": 457,
+          "line": 456,
           "column": 21
         }
       ]
@@ -3208,12 +3041,12 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 115,
+          "line": 90,
           "column": 18
         },
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 121,
+          "line": 96,
           "column": 16
         }
       ]
@@ -3254,7 +3087,7 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 72,
+          "line": 66,
           "column": 25
         }
       ]
@@ -3375,7 +3208,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 76,
+          "line": 46,
           "column": 29
         }
       ]
@@ -3406,18 +3239,6 @@
           "file": "features/calls/CallTable.tsx",
           "line": 58,
           "column": 15
-        }
-      ]
-    },
-    "8df48894086d6fbd": {
-      "source": "原因（可选）",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 256,
-          "column": 16
         }
       ]
     },
@@ -3490,7 +3311,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 74,
+          "line": 44,
           "column": 39
         }
       ]
@@ -3519,20 +3340,6 @@
         }
       ]
     },
-    "92e26b27d5ea8f0e": {
-      "source": "检查更新失败：{error}",
-      "kind": "template",
-      "placeholders": [
-        "error"
-      ],
-      "refs": [
-        {
-          "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 99,
-          "column": 15
-        }
-      ]
-    },
     "9305c0e13642cab4": {
       "source": "未接管",
       "kind": "text",
@@ -3545,7 +3352,7 @@
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 224,
+          "line": 104,
           "column": 62
         }
       ]
@@ -3689,7 +3496,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 243,
+          "line": 120,
           "column": 11
         }
       ]
@@ -3757,7 +3564,7 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 72,
+          "line": 66,
           "column": 40
         }
       ]
@@ -3924,7 +3731,7 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 112,
+          "line": 87,
           "column": 29
         }
       ]
@@ -3936,12 +3743,12 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 127,
+          "line": 102,
           "column": 18
         },
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 133,
+          "line": 108,
           "column": 16
         }
       ]
@@ -3963,12 +3770,12 @@
         },
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 167,
+          "line": 169,
           "column": 36
         },
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 211,
+          "line": 213,
           "column": 22
         },
         {
@@ -4069,7 +3876,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 239,
+          "line": 116,
           "column": 21
         }
       ]
@@ -4168,20 +3975,6 @@
         }
       ]
     },
-    "a80b53f8848e6d27": {
-      "source": "安装更新失败：{error}",
-      "kind": "template",
-      "placeholders": [
-        "error"
-      ],
-      "refs": [
-        {
-          "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 108,
-          "column": 15
-        }
-      ]
-    },
     "a98585871c5313ff": {
       "source": "显示名称",
       "kind": "text",
@@ -4228,7 +4021,7 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 59,
+          "line": 53,
           "column": 25
         }
       ]
@@ -4242,18 +4035,6 @@
           "file": "features/models/CursorModelEditor.tsx",
           "line": 161,
           "column": 118
-        }
-      ]
-    },
-    "ac69f68b7010ec79": {
-      "source": "下载并安装",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 158,
-          "column": 39
         }
       ]
     },
@@ -4292,7 +4073,7 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 140,
+          "line": 115,
           "column": 17
         }
       ]
@@ -4319,12 +4100,12 @@
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 270,
+          "line": 126,
           "column": 64
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 270,
+          "line": 126,
           "column": 125
         }
       ]
@@ -4350,7 +4131,7 @@
       "refs": [
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 57,
+          "line": 59,
           "column": 63
         },
         {
@@ -4483,7 +4264,7 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 85,
+          "line": 79,
           "column": 25
         }
       ]
@@ -4550,18 +4331,6 @@
         }
       ]
     },
-    "b8c9b486c83b5778": {
-      "source": "不再显示广告",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/ads/AdMenu.tsx",
-          "line": 88,
-          "column": 24
-        }
-      ]
-    },
     "b9670c85a4ab939e": {
       "source": "路由",
       "kind": "text",
@@ -4603,7 +4372,7 @@
       "refs": [
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 215,
+          "line": 217,
           "column": 14
         },
         {
@@ -4678,18 +4447,6 @@
           "file": "features/settings/SettingsPage.tsx",
           "line": 277,
           "column": 40
-        }
-      ]
-    },
-    "bda62ce1d5e4ace9": {
-      "source": "可以告诉我们原因",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 261,
-          "column": 24
         }
       ]
     },
@@ -5056,7 +4813,7 @@
       "refs": [
         {
           "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 116,
+          "line": 91,
           "column": 17
         }
       ]
@@ -5224,7 +4981,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 190,
+          "line": 70,
           "column": 54
         }
       ]
@@ -5236,7 +4993,7 @@
       "refs": [
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 147,
+          "line": 149,
           "column": 15
         }
       ]
@@ -5388,7 +5145,7 @@
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 78,
+          "line": 48,
           "column": 29
         }
       ]
@@ -5457,18 +5214,6 @@
           "file": "features/models/CursorModelTestResult.tsx",
           "line": 34,
           "column": 7
-        }
-      ]
-    },
-    "e1295adecbb77755": {
-      "source": "关闭广告",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/ads/FloatingAd.tsx",
-          "line": 64,
-          "column": 66
         }
       ]
     },
@@ -5565,7 +5310,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 75,
+          "line": 45,
           "column": 44
         }
       ]
@@ -5577,12 +5322,12 @@
       "refs": [
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 187,
+          "line": 189,
           "column": 24
         },
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 195,
+          "line": 197,
           "column": 24
         }
       ]
@@ -6003,7 +5748,7 @@
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 79,
+          "line": 49,
           "column": 46
         }
       ]
@@ -6146,11 +5891,6 @@
           "file": "features/plugins/PluginManagementPage.tsx",
           "line": 112,
           "column": 19
-        },
-        {
-          "file": "features/settings/AppLifecycleSettingsCard.tsx",
-          "line": 162,
-          "column": 25
         }
       ]
     },
@@ -6289,7 +6029,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 81,
+          "line": 51,
           "column": 48
         }
       ]
@@ -6313,7 +6053,7 @@
       "refs": [
         {
           "file": "features/settings/CommitSettingsCard.tsx",
-          "line": 167,
+          "line": 169,
           "column": 24
         },
         {
