@@ -254,9 +254,7 @@ async fn bidi_handler(
     let trace = registry.trace(&decoded.request_id);
     let local = if let Some(model_id) = decoded.model_id().map(str::to_owned) {
         // 插件模型 ID 只在本地有意义,永远不转发到 Cursor 官方上游。
-        if model_id.starts_with(crate::plugin::ADAPTER_ID_PREFIX)
-            || registry.store().model(&model_id).await?.is_some()
-        {
+        if resolves_as_local_model(&registry, &model_id).await? {
             tracing::info!(
                 request_id = decoded.request_id,
                 model_id,
@@ -377,7 +375,8 @@ async fn hijack_official_subagent(
     let Some(hijack) = local_subagent_hijack_model(request)? else {
         return Ok(false);
     };
-    if registry.store().model(&hijack.model_id).await?.is_none() {
+    // Same gate as direct Runs: plugin: IDs and model_configs hashes both count.
+    if !resolves_as_local_model(registry, &hijack.model_id).await? {
         return Ok(false);
     }
     let subagent_type = request.subagent_type_name.clone().unwrap_or_default();
@@ -390,6 +389,12 @@ async fn hijack_official_subagent(
     );
     rewrite_requested_model(request, &hijack);
     Ok(true)
+}
+
+/// Local BYOK models: plugin adapter IDs, or a hash present in `model_configs`.
+async fn resolves_as_local_model(registry: &TransportRegistry, model_id: &str) -> Result<bool> {
+    Ok(model_id.starts_with(crate::plugin::ADAPTER_ID_PREFIX)
+        || registry.store().model(model_id).await?.is_some())
 }
 
 fn trace_outcome(

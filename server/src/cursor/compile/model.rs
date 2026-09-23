@@ -76,7 +76,8 @@ pub fn subagent_kind(value: &str) -> SubagentKind {
 ///
 /// Returns `Some` only when this is a subagent Run (`subagent_type_name` set)
 /// and that type has an `Explicit` override. The caller must still confirm the
-/// model exists in the local store before rewriting / routing.
+/// model is a local BYOK target (`plugin:` adapter ID or a `model_configs` hash)
+/// before rewriting / routing.
 pub fn local_subagent_hijack_model(request: &pb::AgentRunRequest) -> Result<Option<ModelSpec>> {
     let Some(type_name) = request
         .subagent_type_name
@@ -87,12 +88,10 @@ pub fn local_subagent_hijack_model(request: &pb::AgentRunRequest) -> Result<Opti
     };
     let kind = subagent_kind(type_name);
     let overrides = overrides(request)?;
-    Ok(
-        match crate::model::override_for(&overrides, &kind) {
-            Some(SubagentModelOverride::Explicit(model)) => Some(model.clone()),
-            Some(SubagentModelOverride::Inherit | SubagentModelOverride::Disabled) | None => None,
-        },
-    )
+    Ok(match crate::model::override_for(&overrides, &kind) {
+        Some(SubagentModelOverride::Explicit(model)) => Some(model.clone()),
+        Some(SubagentModelOverride::Inherit | SubagentModelOverride::Disabled) | None => None,
+    })
 }
 
 /// Rewrite a RunRequest so subsequent local compile uses `model`.
@@ -241,10 +240,7 @@ mod tests {
                 SubagentKind::Named("explore".into()),
                 SubagentModelOverride::Explicit(ModelSpec::new("luna")),
             ),
-            (
-                SubagentKind::GeneralPurpose,
-                SubagentModelOverride::Inherit,
-            ),
+            (SubagentKind::GeneralPurpose, SubagentModelOverride::Inherit),
         ];
         assert!(matches!(
             override_for(&overrides, &SubagentKind::Named("explore".into())),
@@ -267,9 +263,7 @@ mod tests {
             subagent_model_overrides: vec![explore_override("luna-hash")],
             ..Default::default()
         };
-        assert!(local_subagent_hijack_model(&request)
-            .unwrap()
-            .is_none());
+        assert!(local_subagent_hijack_model(&request).unwrap().is_none());
 
         request.subagent_type_name = Some("explore".into());
         let hijack = local_subagent_hijack_model(&request)
@@ -277,6 +271,25 @@ mod tests {
             .expect("explore + explicit should hijack");
         assert_eq!(hijack.model_id, "luna-hash");
         assert_eq!(hijack.reasoning.effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn hijack_accepts_plugin_adapter_model_ids() {
+        let plugin_id = "plugin:dev.cursorbyok.examples.codex-auth/codex/gpt-6-luna";
+        let request = pb::AgentRunRequest {
+            requested_model: Some(pb::RequestedModel {
+                model_id: "grok-4.5".into(),
+                ..Default::default()
+            }),
+            subagent_type_name: Some("explore".into()),
+            subagent_model_overrides: vec![explore_override(plugin_id)],
+            ..Default::default()
+        };
+        let hijack = local_subagent_hijack_model(&request)
+            .unwrap()
+            .expect("explicit plugin override should be a hijack candidate");
+        assert_eq!(hijack.model_id, plugin_id);
+        assert!(hijack.model_id.starts_with("plugin:"));
     }
 
     #[test]
@@ -290,9 +303,7 @@ mod tests {
             subagent_model_overrides: vec![inherit_override("explore")],
             ..Default::default()
         };
-        assert!(local_subagent_hijack_model(&request)
-            .unwrap()
-            .is_none());
+        assert!(local_subagent_hijack_model(&request).unwrap().is_none());
     }
 
     #[test]
@@ -323,6 +334,9 @@ mod tests {
                 .map(|parameter| parameter.value.as_str()),
             Some("medium")
         );
-        assert_eq!(request.model_details.as_ref().unwrap().model_id, "luna-hash");
+        assert_eq!(
+            request.model_details.as_ref().unwrap().model_id,
+            "luna-hash"
+        );
     }
 }
