@@ -458,6 +458,7 @@ fn available_model(model: &ModelConfig) -> AvailableModel {
         &model.display_name,
         &tooltip,
         &contexts,
+        DEFAULT_CONTEXT,
         true,
     );
     let legacy_slugs = variants
@@ -584,6 +585,7 @@ fn model_variants(
     display_name: &str,
     tooltip: &TooltipData,
     contexts: &[(String, String)],
+    default_context: &str,
     thinking: bool,
 ) -> Vec<ModelVariant> {
     // 非思考模型没有 Effort 轴,变体网格只剩 Context × Fast。
@@ -608,6 +610,7 @@ fn model_variants(
                     tooltip,
                     context,
                     context_name,
+                    default_context,
                     *effort,
                     fast,
                 ));
@@ -623,11 +626,12 @@ fn model_variant(
     tooltip: &TooltipData,
     context: &str,
     context_name: &str,
+    default_context: &str,
     effort: Option<(&str, &str)>,
     fast: bool,
 ) -> ModelVariant {
     let mut suffix = Vec::with_capacity(3);
-    if context != DEFAULT_CONTEXT {
+    if context != default_context {
         suffix.push(context_name);
     }
     if let Some((_, effort_name)) = effort {
@@ -645,7 +649,7 @@ fn model_variant(
         )
     };
     let is_default =
-        context == DEFAULT_CONTEXT && !fast && effort.is_none_or(|(effort, _)| effort == "high");
+        context == default_context && !fast && effort.is_none_or(|(effort, _)| effort == "high");
     let mut parameter_values = vec![ModelParameterValue {
         id: "context".into(),
         value: context.into(),
@@ -694,9 +698,21 @@ fn available_plugin_model(model: &PluginModelDescriptor) -> AvailableModel {
     let tooltip = TooltipData {
         markdown_content: model.description.clone(),
     };
-    // Effort 与上下文档位由宿主统一提供,与内置模型一致;插件不再声明这两项。
-    let contexts = context_options(None);
-    let variants = model_variants(&model.id, &model.display_name, &tooltip, &contexts, true);
+    let (contexts, default_context) = if model.plugin_id == "dev.cursorbyok.examples.codex-auth"
+        && model.provider_id == "codex"
+    {
+        (vec![("272k".into(), "272K".into())], "272k")
+    } else {
+        (context_options(None), DEFAULT_CONTEXT)
+    };
+    let variants = model_variants(
+        &model.id,
+        &model.display_name,
+        &tooltip,
+        &contexts,
+        default_context,
+        true,
+    );
     let legacy_slugs = variants
         .iter()
         .filter_map(|variant| variant.legacy_slug.clone())
@@ -800,6 +816,101 @@ mod tests {
             created_at_ms: 0,
             updated_at_ms: 0,
         }
+    }
+
+    fn plugin_model(plugin_id: &str, provider_id: &str) -> PluginModelDescriptor {
+        PluginModelDescriptor {
+            id: format!("plugin:{plugin_id}/{provider_id}/gpt-6"),
+            plugin_id: plugin_id.into(),
+            plugin_name: "Test Plugin".into(),
+            provider_id: provider_id.into(),
+            model_id: "gpt-6".into(),
+            display_name: "GPT-6".into(),
+            description: None,
+            icon: String::new(),
+            provider_type: "openai".into(),
+            max_output_tokens: None,
+            images: true,
+            enabled: true,
+        }
+    }
+
+    fn assert_catalog_contexts(model: &AvailableModel, expected: &[(&str, &str)], default: &str) {
+        let context = model
+            .parameter_definitions
+            .iter()
+            .find(|p| p.id == "context")
+            .unwrap();
+        let values = &context
+            .parameter_type
+            .as_ref()
+            .unwrap()
+            .enum_parameter
+            .as_ref()
+            .unwrap()
+            .values;
+        assert_eq!(
+            values
+                .iter()
+                .map(|v| (v.value.as_str(), v.display_name.as_deref().unwrap()))
+                .collect::<Vec<_>>(),
+            expected,
+        );
+        assert_eq!(model.variants.len(), expected.len() * EFFORTS.len() * 2);
+        for (context, _) in expected {
+            for (effort, _) in EFFORTS {
+                for fast in ["false", "true"] {
+                    let variant = model
+                        .variants
+                        .iter()
+                        .find(|v| {
+                            [("context", *context), ("reasoning", effort), ("fast", fast)]
+                                .iter()
+                                .all(|(id, value)| {
+                                    v.parameter_values
+                                        .iter()
+                                        .any(|p| p.id == *id && p.value == *value)
+                                })
+                        })
+                        .expect("context, reasoning, and fast combination");
+                    let is_default = *context == default && effort == "high" && fast == "false";
+                    assert_eq!(
+                        variant.is_default_non_max_config,
+                        is_default.then_some(true)
+                    );
+                    assert_eq!(variant.is_default_max_config, is_default.then_some(true));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codex_catalog_only_offers_272k_context() {
+        let descriptor = plugin_model("dev.cursorbyok.examples.codex-auth", "codex");
+        let model = available_plugin_model(&descriptor);
+        assert_catalog_contexts(&model, &[("272k", "272K")], "272k");
+        assert!(model
+            .variants
+            .iter()
+            .all(|v| !v.display_name.contains("272K")));
+    }
+
+    #[test]
+    fn other_models_keep_standard_context_options() {
+        for (plugin_id, provider_id) in [
+            ("other-plugin", "codex"),
+            ("dev.cursorbyok.examples.codex-auth", "other-provider"),
+            ("dev.cursorbyok.examples.codex-auth-copy", "codex"),
+        ] {
+            let model = available_plugin_model(&plugin_model(plugin_id, provider_id));
+            assert_catalog_contexts(&model, &CONTEXTS, DEFAULT_CONTEXT);
+        }
+        assert_catalog_contexts(&available_model(&model()), &CONTEXTS, DEFAULT_CONTEXT);
+        let mut custom = model();
+        custom.context_window_tokens = Some(272_000);
+        let mut expected = CONTEXTS.to_vec();
+        expected.push(("272000", "272K (Custom)"));
+        assert_catalog_contexts(&available_model(&custom), &expected, DEFAULT_CONTEXT);
     }
 
     #[test]
