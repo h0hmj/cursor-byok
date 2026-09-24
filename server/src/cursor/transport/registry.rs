@@ -74,6 +74,7 @@ pub enum ModelRole {
 pub(crate) struct RunModelBinding {
     pub(crate) model: String,
     pub(crate) effort: EffortAction,
+    pub(crate) fast: Option<bool>,
     pub(crate) role: ModelRole,
 }
 
@@ -92,6 +93,8 @@ pub struct PreparedRunModel {
     pub model: String,
     /// Policy effort action pinned with the child lifecycle; primary stays Unchanged.
     pub effort: EffortAction,
+    /// `None` leaves request fast alone; `Some` forces the YAML target value for this lifecycle.
+    pub fast: Option<bool>,
     pub role: ModelRole,
 }
 
@@ -100,6 +103,7 @@ pub struct PreparedRunModel {
 pub struct AdmittedRun {
     pub model: String,
     pub effort: EffortAction,
+    pub fast: Option<bool>,
     pub role: ModelRole,
     pub local: bool,
     /// Local transport when `local`; upstream admissions leave this `None`.
@@ -111,7 +115,7 @@ pub struct AdmittedRun {
 impl AdmittedRun {
     /// Whether the admitted selection requires rewriting the original wire body.
     pub fn rewrites_wire(&self, original_model: &str) -> bool {
-        self.model != original_model || self.effort.rewrites_parameters()
+        self.model != original_model || self.effort.rewrites_parameters() || self.fast.is_some()
     }
 }
 
@@ -314,11 +318,13 @@ impl TransportRegistry {
                 .unwrap_or_else(|| RunModelBinding {
                     model: prepared.model.clone(),
                     effort: prepared.effort.clone(),
+                    fast: prepared.fast,
                     role: ModelRole::Child,
                 }),
             ModelRole::Primary => RunModelBinding {
                 model: prepared.model.clone(),
                 effort: EffortAction::Unchanged,
+                fast: None,
                 role: ModelRole::Primary,
             },
         };
@@ -335,6 +341,7 @@ impl TransportRegistry {
             Ok(AdmittedRun {
                 model: selection.model,
                 effort: selection.effort,
+                fast: selection.fast,
                 role: prepared.role,
                 local: true,
                 handle: Some(handle),
@@ -346,12 +353,14 @@ impl TransportRegistry {
                     request_id,
                     &owned.model,
                     owned.effort.clone(),
+                    owned.fast,
                     prepared.role,
                 )
                 .await;
             Ok(AdmittedRun {
                 model: selection.model,
                 effort: selection.effort,
+                fast: selection.fast,
                 role: prepared.role,
                 local: false,
                 handle: None,
@@ -373,6 +382,7 @@ impl TransportRegistry {
         transport.selection = Some(RunModelBinding {
             model: model.to_owned(),
             effort: EffortAction::Unchanged,
+            fast: None,
             role: ModelRole::Primary,
         });
         Ok(())
@@ -392,6 +402,7 @@ impl TransportRegistry {
                         &mut transport.selection,
                         &candidate.model,
                         candidate.effort.clone(),
+                        candidate.fast,
                         candidate.role,
                     )
                 });
@@ -414,6 +425,7 @@ impl TransportRegistry {
                 &mut selection,
                 &candidate.model,
                 candidate.effort.clone(),
+                candidate.fast,
                 candidate.role,
             )
         });
@@ -464,6 +476,7 @@ impl TransportRegistry {
         request_id: &str,
         model: &str,
         effort: EffortAction,
+        fast: Option<bool>,
         role: ModelRole,
     ) -> RunModelBinding {
         let mut upstream = self.inner.upstream.lock().await;
@@ -473,6 +486,7 @@ impl TransportRegistry {
             ModelRole::Primary => RunModelBinding {
                 model: model.to_owned(),
                 effort: EffortAction::Unchanged,
+                fast: None,
                 role,
             },
             ModelRole::Child => previous
@@ -481,6 +495,7 @@ impl TransportRegistry {
                 .unwrap_or_else(|| RunModelBinding {
                     model: model.to_owned(),
                     effort,
+                    fast,
                     role,
                 }),
         };
@@ -607,6 +622,7 @@ fn apply_selection(
     slot: &mut Option<RunModelBinding>,
     model: &str,
     effort: EffortAction,
+    fast: Option<bool>,
     role: ModelRole,
 ) -> RunModelBinding {
     match role {
@@ -614,6 +630,7 @@ fn apply_selection(
             let selection = RunModelBinding {
                 model: model.to_owned(),
                 effort: EffortAction::Unchanged,
+                fast: None,
                 role,
             };
             *slot = Some(selection.clone());
@@ -629,6 +646,7 @@ fn apply_selection(
             let selection = RunModelBinding {
                 model: model.to_owned(),
                 effort,
+                fast,
                 role,
             };
             *slot = Some(selection.clone());

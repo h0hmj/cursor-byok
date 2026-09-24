@@ -166,6 +166,8 @@ mod tests {
             "fallback: {model: ok, effort: none}",
             "fallback: {model: ok, effort: ' none'}",
             "fallback: {model: composer-2.5, effort: high}",
+            "fallback: {model: official-A, effort: high, fast: yes}",
+            "fallback: {model: official-A, effort: high, fast: \"true\"}",
             "types: {explore: string-target}",
             "types: {explore: {model: inherit}}",
             "types: {explore: {model: inherit, effort: high}}",
@@ -183,9 +185,13 @@ mod tests {
             "fallback: {model: future-official-model, effort: high}",
             "fallback: {model: plugin:example/provider/upstream/model, effort: high}",
             "fallback: {model: composer-2.5}",
+            "fallback: {model: composer-2.5, fast: true}",
+            "fallback: {model: official-A, effort: high, fast: false}",
+            "fallback: {model: official-A, effort: high, fast: true}",
             "types: {explore: {model: x, effort: medium}}",
             "mapping: {composer-2.5: {model: official-B, effort: high}}",
             "mapping: {official-A: {model: composer-2.5}}",
+            "mapping: {official-A: {model: composer-2.5, fast: true}}",
         ] {
             tokio::fs::write(&path, valid).await.unwrap();
             SubagentModels::load(&path, store.clone()).await.unwrap();
@@ -228,8 +234,30 @@ mod tests {
             ModelTarget {
                 model: "composer-2.5".into(),
                 effort: None,
+                fast: false,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn fast_omitted_defaults_false_and_explicit_values_load() {
+        let (_dir, path, store) = fixture().await;
+        tokio::fs::write(
+            &path,
+            "types:\n  explore: {model: official-A, effort: high}\n  shell: {model: composer-2.5, fast: true}\nmapping:\n  source: {model: official-B, effort: medium, fast: false}",
+        )
+        .await
+        .unwrap();
+        let models = SubagentModels::load(&path, store).await.unwrap();
+        let explore = models.snapshot().resolve("explore", "source").target;
+        assert!(!explore.fast);
+        assert_eq!(explore.model, "official-A");
+        let shell = models.snapshot().resolve("shell", "source").target;
+        assert!(shell.fast);
+        assert_eq!(shell.model, "composer-2.5");
+        let mapped = models.snapshot().resolve("other", "source").target;
+        assert!(!mapped.fast);
+        assert_eq!(mapped.model, "official-B");
     }
 
     #[tokio::test]
@@ -254,6 +282,7 @@ mod tests {
             ModelTarget {
                 model: model.model_hash.clone(),
                 effort: Some("high".into()),
+                fast: false,
             }
         );
         store.delete_model(&model.model_hash).await.unwrap();

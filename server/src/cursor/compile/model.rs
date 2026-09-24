@@ -97,11 +97,13 @@ impl EffortAction {
     }
 }
 
-/// Selected model identity and effort action applied to a Run request.
+/// Selected model identity and effort/fast actions applied to a Run request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelRewrite {
     pub model_id: String,
     pub effort: EffortAction,
+    /// `None` leaves request `fast` alone; `Some` forces that boolean on the wire.
+    pub fast: Option<bool>,
 }
 
 impl ModelRewrite {
@@ -110,16 +112,18 @@ impl ModelRewrite {
         Self {
             model_id: model_id.into(),
             effort: EffortAction::Unchanged,
+            fast: None,
         }
     }
 }
 
-/// Apply the selected model/effort to the wire request.
+/// Apply the selected model/effort/fast to the wire request.
 ///
-/// - Model change: clear source-model parameters and details; apply Set effort when present.
+/// - Model change: clear source-model parameters and details; apply Set effort and forced fast.
 /// - Same model + Set: override `effort`/`reasoning` aliases only; preserve other parameters.
 /// - Same model + Clear: strip `effort`/`reasoning` only.
-/// - Same model + Unchanged: leave the request unchanged.
+/// - Same model + forced fast: replace every `fast` parameter with the selected value.
+/// - Same model + Unchanged effort + no forced fast: leave the request unchanged.
 /// - Empty `requested_model.model_id` falls back to `model_details` for same-model detection.
 pub fn rewrite_requested_model(request: &mut pb::AgentRunRequest, selection: &ModelRewrite) {
     let current_id = request
@@ -138,45 +142,50 @@ pub fn rewrite_requested_model(request: &mut pb::AgentRunRequest, selection: &Mo
     if model_changed {
         request.requested_model = Some(pb::RequestedModel {
             model_id: selection.model_id.clone(),
-            parameters: effort_parameters(selection.effort.as_set()),
+            parameters: selection_parameters(&selection.effort, selection.fast),
             ..Default::default()
         });
         request.model_details = None;
         return;
     }
-    match &selection.effort {
-        EffortAction::Unchanged => {}
-        EffortAction::Clear => match request.requested_model.as_mut() {
-            Some(requested) => {
-                if requested.model_id.is_empty() {
-                    requested.model_id = selection.model_id.clone();
-                }
-                clear_effort_aliases(&mut requested.parameters);
-            }
-            None => {
-                request.requested_model = Some(pb::RequestedModel {
-                    model_id: selection.model_id.clone(),
-                    parameters: Vec::new(),
-                    ..Default::default()
-                });
-            }
-        },
-        EffortAction::Set(effort) => match request.requested_model.as_mut() {
-            Some(requested) => {
-                if requested.model_id.is_empty() {
-                    requested.model_id = selection.model_id.clone();
-                }
-                apply_effort_override(&mut requested.parameters, effort);
-            }
-            None => {
-                request.requested_model = Some(pb::RequestedModel {
-                    model_id: selection.model_id.clone(),
-                    parameters: effort_parameters(Some(effort)),
-                    ..Default::default()
-                });
-            }
-        },
+    if matches!(selection.effort, EffortAction::Unchanged) && selection.fast.is_none() {
+        return;
     }
+    match request.requested_model.as_mut() {
+        Some(requested) => {
+            if requested.model_id.is_empty() {
+                requested.model_id = selection.model_id.clone();
+            }
+            match &selection.effort {
+                EffortAction::Unchanged => {}
+                EffortAction::Clear => clear_effort_aliases(&mut requested.parameters),
+                EffortAction::Set(effort) => {
+                    apply_effort_override(&mut requested.parameters, effort)
+                }
+            }
+            if let Some(fast) = selection.fast {
+                apply_fast_override(&mut requested.parameters, fast);
+            }
+        }
+        None => {
+            request.requested_model = Some(pb::RequestedModel {
+                model_id: selection.model_id.clone(),
+                parameters: selection_parameters(&selection.effort, selection.fast),
+                ..Default::default()
+            });
+        }
+    }
+}
+
+fn selection_parameters(
+    effort: &EffortAction,
+    fast: Option<bool>,
+) -> Vec<pb::requested_model::ModelParameterValue> {
+    let mut parameters = effort_parameters(effort.as_set());
+    if let Some(fast) = fast {
+        parameters.push(fast_parameter(fast));
+    }
+    parameters
 }
 
 fn effort_parameters(effort: Option<&str>) -> Vec<pb::requested_model::ModelParameterValue> {
@@ -203,6 +212,18 @@ fn apply_effort_override(
         id: "effort".into(),
         value: effort.into(),
     });
+}
+
+fn apply_fast_override(parameters: &mut Vec<pb::requested_model::ModelParameterValue>, fast: bool) {
+    parameters.retain(|parameter| parameter.id != "fast");
+    parameters.push(fast_parameter(fast));
+}
+
+fn fast_parameter(fast: bool) -> pb::requested_model::ModelParameterValue {
+    pb::requested_model::ModelParameterValue {
+        id: "fast".into(),
+        value: if fast { "true" } else { "false" }.into(),
+    }
 }
 
 fn from_requested(
@@ -387,6 +408,7 @@ mod tests {
             &ModelRewrite {
                 model_id: "official-A".into(),
                 effort: EffortAction::Set("high".into()),
+                fast: None,
             },
         );
         let requested = request.requested_model.as_ref().unwrap();
@@ -403,6 +425,58 @@ mod tests {
         let model = from_requested(requested, None).unwrap();
         assert_eq!(model.reasoning.effort.as_deref(), Some("high"));
         assert_eq!(model.latency, ModelLatency::Fast);
+    }
+
+    #[test]
+    fn rewrite_same_model_fast_only_overrides_request_true_with_default_false() {
+        let mut request = pb::AgentRunRequest {
+            requested_model: Some(pb::RequestedModel {
+                model_id: "official-A".into(),
+                max_mode: true,
+                parameters: vec![
+                    pb::requested_model::ModelParameterValue {
+                        id: "thinking".into(),
+                        value: "true".into(),
+                    },
+                    pb::requested_model::ModelParameterValue {
+                        id: "fast".into(),
+                        value: "true".into(),
+                    },
+                    pb::requested_model::ModelParameterValue {
+                        id: "fast".into(),
+                        value: "true".into(),
+                    },
+                    pb::requested_model::ModelParameterValue {
+                        id: "effort".into(),
+                        value: "low".into(),
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        rewrite_requested_model(
+            &mut request,
+            &ModelRewrite {
+                model_id: "official-A".into(),
+                effort: EffortAction::Unchanged,
+                fast: Some(false),
+            },
+        );
+        let requested = request.requested_model.as_ref().unwrap();
+        assert!(requested.max_mode);
+        assert_eq!(
+            requested
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.id.as_str(), parameter.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("thinking", "true"), ("effort", "low"), ("fast", "false")]
+        );
+        assert_eq!(
+            from_requested(requested, None).unwrap().latency,
+            ModelLatency::Standard
+        );
     }
 
     #[test]
@@ -434,6 +508,7 @@ mod tests {
             &ModelRewrite {
                 model_id: "official-B".into(),
                 effort: EffortAction::Set("high".into()),
+                fast: Some(false),
             },
         );
         let requested = request.requested_model.as_ref().unwrap();
@@ -442,15 +517,63 @@ mod tests {
         assert!(request.model_details.is_none());
         assert_eq!(
             requested.parameters,
-            vec![pb::requested_model::ModelParameterValue {
-                id: "effort".into(),
-                value: "high".into(),
-            }]
+            vec![
+                pb::requested_model::ModelParameterValue {
+                    id: "effort".into(),
+                    value: "high".into(),
+                },
+                pb::requested_model::ModelParameterValue {
+                    id: "fast".into(),
+                    value: "false".into(),
+                },
+            ]
         );
     }
 
     #[test]
-    fn rewrite_same_model_without_effort_is_a_noop() {
+    fn rewrite_changed_model_injects_target_effort_and_fast() {
+        let mut request = pb::AgentRunRequest {
+            requested_model: Some(pb::RequestedModel {
+                model_id: "official-A".into(),
+                parameters: vec![
+                    pb::requested_model::ModelParameterValue {
+                        id: "thinking".into(),
+                        value: "true".into(),
+                    },
+                    pb::requested_model::ModelParameterValue {
+                        id: "fast".into(),
+                        value: "false".into(),
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        rewrite_requested_model(
+            &mut request,
+            &ModelRewrite {
+                model_id: "official-B".into(),
+                effort: EffortAction::Set("high".into()),
+                fast: Some(true),
+            },
+        );
+        let requested = request.requested_model.as_ref().unwrap();
+        assert_eq!(
+            requested
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.id.as_str(), parameter.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("effort", "high"), ("fast", "true")]
+        );
+        assert_eq!(
+            from_requested(requested, None).unwrap().latency,
+            ModelLatency::Fast
+        );
+    }
+
+    #[test]
+    fn rewrite_same_model_without_effort_or_fast_is_a_noop() {
         let mut request = pb::AgentRunRequest {
             requested_model: Some(pb::RequestedModel {
                 model_id: "official-A".into(),
@@ -503,6 +626,7 @@ mod tests {
             &ModelRewrite {
                 model_id: "official-A".into(),
                 effort: EffortAction::Set("high".into()),
+                fast: None,
             },
         );
         let requested = request.requested_model.as_ref().unwrap();
@@ -543,6 +667,7 @@ mod tests {
             &ModelRewrite {
                 model_id: "composer-2.5".into(),
                 effort: EffortAction::Clear,
+                fast: None,
             },
         );
         let requested = request.requested_model.as_ref().unwrap();
@@ -553,6 +678,44 @@ mod tests {
                 .map(|parameter| (parameter.id.as_str(), parameter.value.as_str()))
                 .collect::<Vec<_>>(),
             vec![("fast", "true")]
+        );
+    }
+
+    #[test]
+    fn rewrite_composer_clear_with_forced_fast_false_overrides_request() {
+        let mut request = pb::AgentRunRequest {
+            requested_model: Some(pb::RequestedModel {
+                model_id: "composer-2.5".into(),
+                parameters: vec![
+                    pb::requested_model::ModelParameterValue {
+                        id: "effort".into(),
+                        value: "high".into(),
+                    },
+                    pb::requested_model::ModelParameterValue {
+                        id: "fast".into(),
+                        value: "true".into(),
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        rewrite_requested_model(
+            &mut request,
+            &ModelRewrite {
+                model_id: "composer-2.5".into(),
+                effort: EffortAction::Clear,
+                fast: Some(false),
+            },
+        );
+        let requested = request.requested_model.as_ref().unwrap();
+        assert_eq!(
+            requested
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.id.as_str(), parameter.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("fast", "false")]
         );
     }
 

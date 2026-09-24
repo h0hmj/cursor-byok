@@ -12,18 +12,18 @@ Create `~/.cursor-byok-v3/subagent-models.yaml` in the home directory of the use
 fallback: { model: "plugin:your-plugin/your-provider/your-model", effort: high }
 
 types:
-  explore: { model: "plugin:your-plugin/your-provider/fast-model", effort: high }
+  explore: { model: "plugin:your-plugin/your-provider/fast-model", effort: high, fast: true }
   generalPurpose: { model: "composer-2.5" }
   my-reviewer: { model: "plugin:your-plugin/your-provider/review-model", effort: medium }
 
 mapping:
   composer-2.5: { model: "another-official-model-id", effort: high }
-  cursor-grok-4.5-high: { model: "0123456789abcdef", effort: high }
+  cursor-grok-4.5-high: { model: "0123456789abcdef", effort: high, fast: false }
 ```
 
-每个目标是对象：必填 `model`；非 Composer 目标必填 `effort`，Composer 目标（`composer-*`）禁止写 `effort`。字符串形式的旧目标不再接受。三个字段都可以省略。优先级固定为 `types[type] > mapping[请求模型] > fallback > 原请求模型`。命中规则后取整个目标对象，不会从低优先级规则合并 effort。因此，配置了 type 或 fallback 时，显式选中的模型也可能被覆盖。`fallback` 不是请求失败后的重试。
+每个目标是对象：必填 `model`；可选 `fast`（布尔，省略等价于 `false`）；非 Composer 目标必填 `effort`，Composer 目标（`composer-*`）禁止写 `effort`。Composer 与非 Composer 都可设置 `fast`。字符串形式的旧目标不再接受。三个字段都可以省略。优先级固定为 `types[type] > mapping[请求模型] > fallback > 原请求模型`。命中规则后取整个目标对象，不会从低优先级规则合并 effort 或 fast。因此，配置了 type 或 fallback 时，显式选中的模型也可能被覆盖。`fallback` 不是请求失败后的重试。
 
-Each target is an object with required `model`. Non-Composer targets require `effort`; Composer targets (`composer-*`) must omit `effort`. Legacy string targets are rejected. All fields are optional. Priority is `types[type] > mapping[requested model] > fallback > original requested model`. A hit takes the whole target object; effort is not merged from lower-priority rules. A type rule or fallback can override an explicit selection. Fallback is a default, not error recovery.
+Each target is an object with required `model`. Optional `fast` is a boolean; omitting it equals `false`. Non-Composer targets require `effort`; Composer targets (`composer-*`) must omit `effort`. Composer and non-Composer targets may set `fast`. Legacy string targets are rejected. All sections are optional. Priority is `types[type] > mapping[requested model] > fallback > original requested model`. A hit takes the whole target object; effort and fast are not merged from lower-priority rules. A type rule or fallback can override an explicit selection. Fallback is a default, not error recovery.
 
 映射只执行一次：同时存在 `A: B` 和 `B: C` 时，请求 A 使用 B。自定义 type 使用子代理的原始名称，大小写敏感。YAML 是唯一映射来源；Cursor 界面传来的旧模型 override 不再用来补救选模，禁用子代理仍然生效。
 
@@ -41,6 +41,17 @@ Mappings are single-pass: with both `A: B` and `B: C`, requesting A selects B. T
 - 当前拒绝空字符串和 `none`。不对供应商做统一能力白名单；真实是否接受由上游决定。不存在 default-high 注入。
 
 Non-Composer YAML targets require `effort`; Composer targets must omit it. Validation runs at startup/reload; invalid reloads keep the last valid snapshot. Effort rules apply to the **final target** model. Explicit effort overrides request aliases and blocks saved local defaults. Composer hits clear conflicting `effort`/`reasoning` and do not inject request effort. Unmatched requests (no type/mapping/fallback) pass through unchanged—no mandatory effort and no defaulting. Same-model effort-only changes still rewrite the official protobuf body. YAML targets must not use `model: inherit`; Task.model `inherit` still resolves to the parent model before YAML applies. Empty effort and `none` are rejected. There is no speculative capability whitelist and no default-high injection.
+
+## Fast
+
+- `fast` 为布尔；省略等价于 `false`。非法类型（字符串、数字等）在加载/热更新时拒绝，并保留上一份有效快照。
+- 命中规则：目标 `fast` **强制覆盖**请求中的 `fast`，包括用默认 `false` 覆盖请求里的 `true`。
+- 未命中、主代理、disabled：不干预请求参数与转发字节。
+- Composer 与非 Composer 均可设置 `fast`；effort 约束不变。
+- 同模型仅改 `fast` 也会改写官方 protobuf；换模型时清除原参数并注入目标 effort/fast。
+- 本地 BYOK 仍通过既有 `fast → ModelLatency` 解析走供应商/插件路径。
+
+`fast` is a boolean; omitting it equals `false`. Non-boolean values are rejected at load/reload. A rule hit forces the target `fast`, including overriding request `true` with default `false`. Unmatched, primary, and disabled paths leave the request alone. Composer and non-Composer targets may set `fast`. Same-model fast-only changes rewrite the official body; model changes clear source parameters and inject the target effort/fast. Local BYOK continues to map `fast` to `ModelLatency` on the existing provider/plugin path.
 
 ## 模型 ID / Model IDs
 
@@ -67,9 +78,9 @@ This file contains model references only, never API keys. Existing provider/plug
 
 - 启动时文件不存在：使用空策略；文件存在但无效：明确报错。
 - 保存有效配置后无需重启，轮询检测并校验后原子替换当前策略。
-- 新启动的子代理使用最新有效策略；已经启动的同一子代理不切换模型或 effort（生命周期内钉住选中的 model+effort）。
+- 新启动的子代理使用最新有效策略；已经启动的同一子代理不切换 model、effort 或 fast（生命周期内钉住选中的 model+effort+fast）。
 - 无效 YAML、读取错误、临时删除文件：保留上一份有效策略并记录错误。建议编辑器使用原子保存；清空策略请写入 `{}`，不要删除文件或留空。
 - 本地主代理在下一次正常上下文编译时看到更新的模型列表，不中断正在进行的生成。工具定义不因更新改变，旧历史不会被改写。
-- 路由诊断区分策略候选值与接纳后的实际选择：策略日志记录 type、命中规则、配置版本和 `candidate_*`；接纳日志记录 `selected_model`、`selected_effort_action` 及是否与候选值不同。effort 操作中 `Set("high")` 表示强制 high，`Clear` 表示清除 effort，`Unchanged` 表示保留请求参数、并非关闭 effort。热更新后的旧生命周期可能继续使用已锁定值，应以接纳日志为准。
+- 路由诊断区分策略候选值与接纳后的实际选择：策略日志记录 type、命中规则、配置版本和 `candidate_*`；接纳日志记录 `selected_model`、`selected_effort_action`、`selected_fast` 及是否与候选值不同。effort 操作中 `Set("high")` 表示强制 high，`Clear` 表示清除 effort，`Unchanged` 表示保留请求参数、并非关闭 effort。`selected_fast=None` 表示未干预；`Some(false/true)` 表示命中后的强制值。热更新后的旧生命周期可能继续使用已锁定值，应以接纳日志为准。
 
-Valid changes reload without restarting. Invalid/deleted files retain the last valid policy. Write `{}` to clear it. New subagents use the latest policy; already-started subagents keep their selected model and effort for the lifecycle. BYOK parents see updated model context on their next normal context compilation, without rewriting earlier history or changing tool schemas. Policy logs show candidates; admission logs show the selected model and effort action. `Set` overrides effort, `Clear` removes it, and `Unchanged` preserves request parameters. When a lifecycle retains an earlier selection after reload, use the admission log rather than the candidate log.
+Valid changes reload without restarting. Invalid/deleted files retain the last valid policy. Write `{}` to clear it. New subagents use the latest policy; already-started subagents keep their selected model, effort, and fast for the lifecycle. BYOK parents see updated model context on their next normal context compilation, without rewriting earlier history or changing tool schemas. Policy logs show candidates; admission logs show the selected model, effort action, and fast. `Set` overrides effort, `Clear` removes it, and `Unchanged` preserves request parameters. `selected_fast=None` means no intervention; `Some(false/true)` is the forced hit value. When a lifecycle retains an earlier selection after reload, use the admission log rather than the candidate log.

@@ -263,6 +263,7 @@ fn sync_run_model(
         &crate::cursor::compile::ModelRewrite {
             model_id: admitted.model.clone(),
             effort: admitted.effort.clone(),
+            fast: admitted.fast,
         },
     );
     Ok(())

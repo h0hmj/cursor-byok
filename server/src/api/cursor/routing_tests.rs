@@ -57,6 +57,26 @@ async fn admit_selected(
     admitted
 }
 
+fn effort_and_fast(effort: &str, fast: bool) -> Vec<agent::requested_model::ModelParameterValue> {
+    vec![
+        agent::requested_model::ModelParameterValue {
+            id: "effort".into(),
+            value: effort.into(),
+        },
+        agent::requested_model::ModelParameterValue {
+            id: "fast".into(),
+            value: if fast { "true" } else { "false" }.into(),
+        },
+    ]
+}
+
+fn fast_only(fast: bool) -> Vec<agent::requested_model::ModelParameterValue> {
+    vec![agent::requested_model::ModelParameterValue {
+        id: "fast".into(),
+        value: if fast { "true" } else { "false" }.into(),
+    }]
+}
+
 fn request(id: &str, kind: Option<&str>, model: &str) -> ai::BidiAppendRequest {
     ai::BidiAppendRequest {
         request_id: Some(ai::BidiRequestId {
@@ -199,10 +219,7 @@ async fn handler_forwards_rewritten_official_body_to_real_http_upstream() {
             run.requested_model.unwrap(),
             agent::RequestedModel {
                 model_id: "official-longer-B".into(),
-                parameters: vec![agent::requested_model::ModelParameterValue {
-                    id: "effort".into(),
-                    value: "high".into(),
-                }],
+                parameters: effort_and_fast("high", false),
                 ..Default::default()
             }
         );
@@ -339,13 +356,7 @@ async fn official_target_rewrites_nested_hex_protobuf_and_content_length() {
         assert!(run.model_details.is_none());
         let model = run.requested_model.unwrap();
         assert!(!model.max_mode);
-        assert_eq!(
-            model.parameters,
-            vec![agent::requested_model::ModelParameterValue {
-                id: "effort".into(),
-                value: "high".into(),
-            }]
-        );
+        assert_eq!(model.parameters, effort_and_fast("high", false));
         assert_eq!(run.subagent_model_overrides.len(), 1);
         assert_eq!(bidi::decode(&wire).unwrap().model_id(), Some("source"));
     }
@@ -804,13 +815,7 @@ async fn official_a_to_b_with_high_effort_is_forwarded_to_upstream() {
     let forwarded = bidi::decode(&connect::decode_unary(&received).unwrap()).unwrap();
     assert_eq!(forwarded.model_id(), Some("official-B"));
     let model = run_requested_model(&forwarded);
-    assert_eq!(
-        model.parameters,
-        vec![agent::requested_model::ModelParameterValue {
-            id: "effort".into(),
-            value: "high".into(),
-        }]
-    );
+    assert_eq!(model.parameters, effort_and_fast("high", false));
     assert!(!model.max_mode);
 }
 
@@ -854,7 +859,50 @@ async fn official_same_model_effort_only_rewrites_forwarded_payload() {
             .iter()
             .map(|parameter| (parameter.id.as_str(), parameter.value.as_str()))
             .collect::<Vec<_>>(),
-        vec![("fast", "true"), ("effort", "high")]
+        vec![("effort", "high"), ("fast", "false")]
+    );
+}
+
+#[tokio::test]
+async fn official_same_model_fast_only_rewrites_forwarded_payload() {
+    let (_dir, registry) =
+        fixture("mapping: {official-A: {model: official-A, effort: high, fast: true}}").await;
+    let mut upstream = MockUpstream::start(&registry).await;
+    let wire = request_with_params(
+        "a-to-a-fast",
+        Some("explore"),
+        "official-A",
+        vec![
+            agent::requested_model::ModelParameterValue {
+                id: "effort".into(),
+                value: "low".into(),
+            },
+            agent::requested_model::ModelParameterValue {
+                id: "thinking".into(),
+                value: "true".into(),
+            },
+        ],
+    );
+    let original: Bytes = wire.encode_to_vec().into();
+    assert_eq!(
+        upstream
+            .append(&registry, original.clone())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let (_, received) = upstream.received().await;
+    assert_ne!(received, original);
+    let model =
+        run_requested_model(&bidi::decode(&connect::decode_unary(&received).unwrap()).unwrap());
+    assert_eq!(
+        model
+            .parameters
+            .iter()
+            .map(|parameter| (parameter.id.as_str(), parameter.value.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("thinking", "true"), ("effort", "high"), ("fast", "true")]
     );
 }
 
@@ -885,14 +933,9 @@ async fn hash_and_plugin_targets_carry_final_effort_over_local_defaults() {
     let admitted = admit_selected(&registry, &mut hash_child, &HeaderMap::new()).await;
     assert!(admitted.local);
     assert_eq!(admitted.effort, EffortAction::Set("high".into()));
+    assert_eq!(admitted.fast, Some(false));
     let requested = run_requested_model(&hash_child);
-    assert_eq!(
-        requested.parameters,
-        vec![agent::requested_model::ModelParameterValue {
-            id: "effort".into(),
-            value: "high".into(),
-        }]
-    );
+    assert_eq!(requested.parameters, effort_and_fast("high", false));
     let mut spec = crate::model::ModelSpec {
         model_id: local.model_hash.clone(),
         display_name: None,
@@ -915,12 +958,10 @@ async fn hash_and_plugin_targets_carry_final_effort_over_local_defaults() {
     assert!(admitted.local);
     assert_eq!(admitted.model, "plugin:example/provider/plugin-model");
     assert_eq!(admitted.effort, EffortAction::Set("high".into()));
+    assert_eq!(admitted.fast, Some(false));
     assert_eq!(
         run_requested_model(&plugin_child).parameters,
-        vec![agent::requested_model::ModelParameterValue {
-            id: "effort".into(),
-            value: "high".into(),
-        }]
+        effort_and_fast("high", false)
     );
 }
 
@@ -954,10 +995,11 @@ async fn composer_target_clears_effort_and_unmatched_passthrough_keeps_bytes() {
     let admitted = admit_selected(&registry, &mut composer, &HeaderMap::new()).await;
     assert_eq!(admitted.model, "composer-2.5");
     assert_eq!(admitted.effort, EffortAction::Clear);
+    assert_eq!(admitted.fast, Some(false));
     assert!(admitted.rewrites_wire("composer-source"));
     let model = run_requested_model(&composer);
     assert!(!model.max_mode);
-    assert!(model.parameters.is_empty());
+    assert_eq!(model.parameters, fast_only(false));
 
     let (_dir, registry) = fixture("{}").await;
     let wire = request("unmatched-bytes", Some("explore"), "source");
@@ -979,15 +1021,108 @@ async fn composer_target_clears_effort_and_unmatched_passthrough_keeps_bytes() {
     let admitted = admit_selected(&registry, &mut changed, &HeaderMap::new()).await;
     assert_eq!(admitted.model, "official-B");
     assert_eq!(admitted.effort, EffortAction::Set("high".into()));
+    assert_eq!(admitted.fast, Some(false));
     let model = run_requested_model(&changed);
     assert!(!model.max_mode);
-    assert_eq!(
-        model.parameters,
+    assert_eq!(model.parameters, effort_and_fast("high", false));
+}
+
+#[tokio::test]
+async fn local_byok_and_composer_honor_explicit_fast_true() {
+    let (dir, registry) = fixture("{}").await;
+    let input = serde_json::from_value(serde_json::json!({
+        "display_name": "Fast latency model", "type": "openai",
+        "base_url": "https://example.com/v1", "api_key": "test",
+        "tooltip_data": "Fast latency model", "model_id": "model"
+    }))
+    .unwrap();
+    let local = registry.store().create_model(&input).await.unwrap();
+    tokio::fs::write(
+        dir.path().join("subagent-models.yaml"),
+        format!(
+            "types:\n  explore: {{model: {}, effort: high, fast: true}}\n  shell: {{model: composer-2.5, fast: true}}",
+            local.model_hash
+        ),
+    )
+    .await
+    .unwrap();
+    registry.subagent_models().reload().await.unwrap();
+
+    let mut hash_child = bidi::decode(&request_with_params(
+        "hash-fast",
+        Some("explore"),
+        "official",
         vec![agent::requested_model::ModelParameterValue {
-            id: "effort".into(),
-            value: "high".into(),
-        }]
+            id: "fast".into(),
+            value: "false".into(),
+        }],
+    ))
+    .unwrap();
+    let admitted = admit_selected(&registry, &mut hash_child, &HeaderMap::new()).await;
+    assert!(admitted.local);
+    assert_eq!(admitted.fast, Some(true));
+    assert_eq!(
+        run_requested_model(&hash_child).parameters,
+        effort_and_fast("high", true)
     );
+
+    let mut composer = bidi::decode(&request_with_params(
+        "composer-fast",
+        Some("shell"),
+        "composer-source",
+        vec![agent::requested_model::ModelParameterValue {
+            id: "fast".into(),
+            value: "false".into(),
+        }],
+    ))
+    .unwrap();
+    let admitted = admit_selected(&registry, &mut composer, &HeaderMap::new()).await;
+    assert!(!admitted.local);
+    assert_eq!(admitted.model, "composer-2.5");
+    assert_eq!(admitted.effort, EffortAction::Clear);
+    assert_eq!(admitted.fast, Some(true));
+    assert_eq!(run_requested_model(&composer).parameters, fast_only(true));
+}
+
+#[tokio::test]
+async fn unmatched_child_keeps_request_fast_bytes_unchanged() {
+    let (_dir, registry) = fixture("{}").await;
+    let wire = request_with_params(
+        "unmatched-fast",
+        Some("explore"),
+        "source",
+        vec![
+            agent::requested_model::ModelParameterValue {
+                id: "effort".into(),
+                value: "medium".into(),
+            },
+            agent::requested_model::ModelParameterValue {
+                id: "fast".into(),
+                value: "true".into(),
+            },
+        ],
+    );
+    let original: Bytes = wire.encode_to_vec().into();
+    let mut upstream = MockUpstream::start(&registry).await;
+    assert_eq!(
+        upstream
+            .append(&registry, original.clone())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let (_, received) = upstream.received().await;
+    assert_eq!(received, original);
+    let admitted = admit_selected(
+        &registry,
+        &mut bidi::decode(&wire).unwrap(),
+        &HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(admitted.effort, EffortAction::Unchanged);
+    assert_eq!(admitted.fast, None);
+    assert!(!admitted.rewrites_wire("source"));
 }
 #[tokio::test]
 async fn conflict_aliases_are_cleared_for_explicit_effort() {
@@ -1011,13 +1146,14 @@ async fn conflict_aliases_are_cleared_for_explicit_effort() {
     .unwrap();
     let admitted = admit_selected(&registry, &mut decoded, &HeaderMap::new()).await;
     assert_eq!(admitted.effort, EffortAction::Set("high".into()));
+    assert_eq!(admitted.fast, Some(false));
     assert_eq!(
         run_requested_model(&decoded)
             .parameters
             .iter()
             .map(|parameter| (parameter.id.as_str(), parameter.value.as_str()))
             .collect::<Vec<_>>(),
-        vec![("effort", "high")]
+        vec![("effort", "high"), ("fast", "false")]
     );
 }
 
@@ -1071,10 +1207,11 @@ async fn effort_only_hot_reload_keeps_existing_child_and_applies_to_new_child() 
         bidi::decode(&request("existing-effort", Some("explore"), "source")).unwrap();
     let admitted = admit_selected(&registry, &mut existing, &HeaderMap::new()).await;
     assert_eq!(admitted.effort, EffortAction::Set("high".into()));
+    assert_eq!(admitted.fast, Some(false));
 
     tokio::fs::write(
         dir.path().join("subagent-models.yaml"),
-        "fallback: {model: official-target, effort: low}",
+        "fallback: {model: official-target, effort: low, fast: true}",
     )
     .await
     .unwrap();
@@ -1086,36 +1223,33 @@ async fn effort_only_hot_reload_keeps_existing_child_and_applies_to_new_child() 
         .unwrap()
         .unwrap();
     assert_eq!(prepared.effort, EffortAction::Set("low".into()));
+    assert_eq!(prepared.fast, Some(true));
     let admitted = registry
         .admit_run_model(&retry.request_id, &prepared)
         .await
         .unwrap();
     assert_eq!(admitted.effort, EffortAction::Set("high".into()));
+    assert_eq!(admitted.fast, Some(false));
     sync_decoded_model(&mut retry, &admitted).unwrap();
     assert_eq!(
         run_requested_model(&retry).parameters,
-        vec![agent::requested_model::ModelParameterValue {
-            id: "effort".into(),
-            value: "high".into(),
-        }]
+        effort_and_fast("high", false)
     );
 
     let mut next = bidi::decode(&request("new-effort", Some("explore"), "source")).unwrap();
     let admitted = admit_selected(&registry, &mut next, &HeaderMap::new()).await;
     assert_eq!(admitted.effort, EffortAction::Set("low".into()));
+    assert_eq!(admitted.fast, Some(true));
     assert_eq!(
         run_requested_model(&next).parameters,
-        vec![agent::requested_model::ModelParameterValue {
-            id: "effort".into(),
-            value: "low".into(),
-        }]
+        effort_and_fast("low", true)
     );
 }
 
 #[tokio::test]
 async fn concurrent_effort_admission_and_closing_lifecycle_pin_effort() {
     let (_dir, registry) = fixture(
-        "mapping:\n  source-a: {model: shared, effort: high}\n  source-b: {model: other, effort: low}",
+        "mapping:\n  source-a: {model: shared, effort: high, fast: true}\n  source-b: {model: other, effort: low, fast: false}",
     )
     .await;
     let mut upstream = MockUpstream::start(&registry).await;
@@ -1129,31 +1263,43 @@ async fn concurrent_effort_admission_and_closing_lifecycle_pin_effort() {
     assert_eq!(right_result.unwrap().status(), StatusCode::NO_CONTENT);
     let (_, first) = upstream.received().await;
     let (_, second) = upstream.received().await;
-    let first_effort =
+    let first_params =
         run_requested_model(&bidi::decode(&connect::decode_unary(&first).unwrap()).unwrap())
             .parameters
             .into_iter()
-            .find(|parameter| parameter.id == "effort")
-            .map(|parameter| parameter.value);
-    let second_effort =
+            .map(|parameter| (parameter.id, parameter.value))
+            .collect::<Vec<_>>();
+    let second_params =
         run_requested_model(&bidi::decode(&connect::decode_unary(&second).unwrap()).unwrap())
             .parameters
             .into_iter()
-            .find(|parameter| parameter.id == "effort")
-            .map(|parameter| parameter.value);
-    assert_eq!(first_effort, second_effort);
-    assert!(first_effort.as_deref() == Some("high") || first_effort.as_deref() == Some("low"));
+            .map(|parameter| (parameter.id, parameter.value))
+            .collect::<Vec<_>>();
+    assert_eq!(first_params, second_params);
+    assert!(
+        first_params
+            == vec![
+                ("effort".into(), "high".into()),
+                ("fast".into(), "true".into())
+            ]
+            || first_params
+                == vec![
+                    ("effort".into(), "low".into()),
+                    ("fast".into(), "false".into())
+                ]
+    );
 
     let (dir, registry) =
-        fixture("fallback: {model: plugin:example/provider/first, effort: high}").await;
+        fixture("fallback: {model: plugin:example/provider/first, effort: high, fast: true}").await;
     let mut first = bidi::decode(&request("close-effort", Some("explore"), "source")).unwrap();
     let admitted = admit_selected(&registry, &mut first, &HeaderMap::new()).await;
     assert_eq!(admitted.effort, EffortAction::Set("high".into()));
+    assert_eq!(admitted.fast, Some(true));
     let closing = admitted.handle.unwrap();
     closing.begin_close();
     tokio::fs::write(
         dir.path().join("subagent-models.yaml"),
-        "fallback: {model: plugin:example/provider/second, effort: low}",
+        "fallback: {model: plugin:example/provider/second, effort: low, fast: false}",
     )
     .await
     .unwrap();
@@ -1162,6 +1308,7 @@ async fn concurrent_effort_admission_and_closing_lifecycle_pin_effort() {
     let admitted = admit_selected(&registry, &mut next, &HeaderMap::new()).await;
     assert_eq!(admitted.model, "plugin:example/provider/second");
     assert_eq!(admitted.effort, EffortAction::Set("low".into()));
+    assert_eq!(admitted.fast, Some(false));
     closing.close_transport();
     tokio::time::timeout(Duration::from_secs(1), closing.wait_transport_closed())
         .await
@@ -1233,7 +1380,7 @@ async fn routing_logs_distinguish_reloaded_candidate_from_pinned_selection() {
 
         tokio::fs::write(
             dir.path().join("subagent-models.yaml"),
-            "fallback: {model: official-new, effort: low}",
+            "fallback: {model: official-new, effort: low, fast: true}",
         )
         .await
         .unwrap();
@@ -1245,7 +1392,14 @@ async fn routing_logs_distinguish_reloaded_candidate_from_pinned_selection() {
         let (_, received) = upstream.received().await;
         let decoded = bidi::decode(&connect::decode_unary(&received).unwrap()).unwrap();
         assert_eq!(decoded.model_id(), Some("official-target"));
-        assert_eq!(run_requested_model(&decoded).parameters[0].value, "high");
+        assert_eq!(
+            run_requested_model(&decoded)
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.id.as_str(), parameter.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("effort", "high"), ("fast", "false")]
+        );
     }
     .with_subscriber(subscriber)
     .await;
@@ -1267,8 +1421,10 @@ async fn routing_logs_distinguish_reloaded_candidate_from_pinned_selection() {
     for field in [
         "candidate_model=\"official-new\"",
         "candidate_effort_action=Set(\"low\")",
+        "candidate_fast=Some(true)",
         "selected_model=\"official-target\"",
         "selected_effort_action=Set(\"high\")",
+        "selected_fast=Some(false)",
         "selection_differs_from_candidate=true",
     ] {
         assert!(selected.contains(field), "missing {field}: {selected}");

@@ -279,10 +279,13 @@ async fn bidi_handler(
             original_model = prepared.original,
             candidate_model = prepared.model,
             candidate_effort_action = ?prepared.effort,
+            candidate_fast = ?prepared.fast,
             selected_model = admitted.model,
             selected_effort_action = ?admitted.effort,
+            selected_fast = ?admitted.fast,
             selection_differs_from_candidate = prepared.model != admitted.model
-                || prepared.effort != admitted.effort,
+                || prepared.effort != admitted.effort
+                || prepared.fast != admitted.fast,
             route = if admitted.local { "local_byok" } else { "cursor_official" },
             "admitted Cursor Run model selection"
         );
@@ -401,10 +404,11 @@ async fn select_run_model(
             original: original.clone(),
             model: original,
             effort: EffortAction::Unchanged,
+            fast: None,
             role: ModelRole::Primary,
         }));
     };
-    let (model, effort) = if request
+    let (model, effort, fast) = if request
         .subagent_model_overrides
         .iter()
         .find(|entry| entry.subagent_type == kind)
@@ -415,7 +419,7 @@ async fn select_run_model(
             )
         }) {
         // A per-type Disabled selection must not be overridden by YAML routing.
-        (original.clone(), EffortAction::Unchanged)
+        (original.clone(), EffortAction::Unchanged, None)
     } else {
         let snapshot = registry.subagent_models().snapshot();
         let resolution = snapshot.resolve(kind, &original);
@@ -435,14 +439,17 @@ async fn select_run_model(
         } else {
             resolution.target.model.clone()
         };
-        let effort = match resolution.reason {
-            ResolutionReason::Original => EffortAction::Unchanged,
-            _ if is_composer_model(&model) => EffortAction::Clear,
-            _ => EffortAction::Set(resolution.target.effort.clone().ok_or_else(|| {
-                crate::Error::Config(format!(
-                    "subagent policy non-Composer target {model} requires effort"
-                ))
-            })?),
+        let (effort, fast) = match resolution.reason {
+            ResolutionReason::Original => (EffortAction::Unchanged, None),
+            _ if is_composer_model(&model) => (EffortAction::Clear, Some(resolution.target.fast)),
+            _ => (
+                EffortAction::Set(resolution.target.effort.clone().ok_or_else(|| {
+                    crate::Error::Config(format!(
+                        "subagent policy non-Composer target {model} requires effort"
+                    ))
+                })?),
+                Some(resolution.target.fast),
+            ),
         };
         tracing::info!(
             request_id = decoded.request_id,
@@ -452,14 +459,16 @@ async fn select_run_model(
             original_model = original,
             candidate_model = model,
             candidate_effort_action = ?effort,
+            candidate_fast = ?fast,
             "resolved child Run model policy candidate"
         );
-        (model, effort)
+        (model, effort, fast)
     };
     Ok(Some(PreparedRunModel {
         original,
         model,
         effort,
+        fast,
         role: ModelRole::Child,
     }))
 }
@@ -478,6 +487,7 @@ fn sync_decoded_model(
         &ModelRewrite {
             model_id: admitted.model.clone(),
             effort: admitted.effort.clone(),
+            fast: admitted.fast,
         },
     );
     Ok(())

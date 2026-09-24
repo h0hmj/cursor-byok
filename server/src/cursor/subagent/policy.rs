@@ -10,13 +10,17 @@ pub fn is_composer_model(model_id: &str) -> bool {
     model_id.starts_with("composer-")
 }
 
-/// One YAML rule target: required model identity plus effort rules by target kind.
+/// One YAML rule target: required model identity plus effort/fast rules by target kind.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ModelTarget {
     pub model: String,
     #[serde(default)]
     pub effort: Option<String>,
+    /// Omitted YAML `fast` deserializes as `false`. On a rule hit this value is forced;
+    /// unmatched / primary / disabled paths leave the request alone (`Option::None` upstream).
+    #[serde(default)]
+    pub fast: bool,
 }
 
 impl ModelTarget {
@@ -24,6 +28,7 @@ impl ModelTarget {
         Self {
             model: model.into(),
             effort: None,
+            fast: false,
         }
     }
 }
@@ -106,7 +111,7 @@ impl Policy {
 
     pub fn context(&self) -> String {
         let mut context = String::from(
-            "Subagent model policy (supersedes earlier model lists):\nUse only the referenced model IDs below when selecting Task.model. The latest server policy at child startup is authoritative, even if this context predates a reload.\nSelection is single-pass: exact type override > exact requested-model mapping > fallback > original requested model. Selected targets are never mapped again. A hit uses the whole target object; effort is not merged from lower-priority rules.\nYAML targets must not use model \"inherit\". Task.model \"inherit\" still selects the parent model identity, then this policy applies.\nNon-Composer YAML targets require effort; Composer targets (`composer-*`) forbid effort.\nReferenced model IDs (including mapping keys; not an exhaustive official-model catalog):\n",
+            "Subagent model policy (supersedes earlier model lists):\nUse only the referenced model IDs below when selecting Task.model. The latest server policy at child startup is authoritative, even if this context predates a reload.\nSelection is single-pass: exact type override > exact requested-model mapping > fallback > original requested model. Selected targets are never mapped again. A hit uses the whole target object; effort and fast are not merged from lower-priority rules. Omitted fast defaults to false and is forced on a hit.\nYAML targets must not use model \"inherit\". Task.model \"inherit\" still selects the parent model identity, then this policy applies.\nNon-Composer YAML targets require effort; Composer targets (`composer-*`) forbid effort. Composer and non-Composer targets may set fast.\nReferenced model IDs (including mapping keys; not an exhaustive official-model catalog):\n",
         );
         for model in self.referenced_models() {
             context.push_str(&format!("- {model:?}\n"));
@@ -162,8 +167,11 @@ impl Policy {
 
 fn format_target(target: &ModelTarget) -> String {
     match &target.effort {
-        Some(effort) => format!("model={:?} effort={effort:?}", target.model),
-        None => format!("model={:?}", target.model),
+        Some(effort) => format!(
+            "model={:?} effort={effort:?} fast={}",
+            target.model, target.fast
+        ),
+        None => format!("model={:?} fast={}", target.model, target.fast),
     }
 }
 
@@ -232,6 +240,15 @@ mod tests {
         ModelTarget {
             model: model.into(),
             effort: Some(effort.into()),
+            fast: false,
+        }
+    }
+
+    fn target_with_effort_fast(model: &str, effort: &str, fast: bool) -> ModelTarget {
+        ModelTarget {
+            model: model.into(),
+            effort: Some(effort.into()),
+            fast,
         }
     }
 
@@ -244,34 +261,46 @@ mod tests {
     }
 
     #[test]
-    fn precedence_is_single_pass_and_does_not_merge_effort() {
+    fn precedence_is_single_pass_and_does_not_merge_effort_or_fast() {
         let policy = Policy {
-            fallback: Some(target_with_effort("fallback", "low")),
-            types: BTreeMap::from([("explore".into(), target_with_effort("type-model", "high"))]),
+            fallback: Some(target_with_effort_fast("fallback", "low", true)),
+            types: BTreeMap::from([(
+                "explore".into(),
+                target_with_effort_fast("type-model", "high", false),
+            )]),
             mapping: BTreeMap::from([
-                ("original".into(), target_with_effort("mapped", "medium")),
-                ("mapped".into(), target_with_effort("recursive", "low")),
-                ("inherit".into(), target_with_effort("not-parent", "high")),
+                (
+                    "original".into(),
+                    target_with_effort_fast("mapped", "medium", true),
+                ),
+                (
+                    "mapped".into(),
+                    target_with_effort_fast("recursive", "low", false),
+                ),
+                (
+                    "inherit".into(),
+                    target_with_effort_fast("not-parent", "high", true),
+                ),
             ]),
         };
         assert_eq!(
             policy.resolve("explore", "original"),
             Resolution {
-                target: target_with_effort("type-model", "high"),
+                target: target_with_effort_fast("type-model", "high", false),
                 reason: ResolutionReason::Type
             }
         );
         assert_eq!(
             policy.resolve("other", "original"),
             Resolution {
-                target: target_with_effort("mapped", "medium"),
+                target: target_with_effort_fast("mapped", "medium", true),
                 reason: ResolutionReason::Mapping
             }
         );
         assert_eq!(
             policy.resolve("other", "unknown"),
             Resolution {
-                target: target_with_effort("fallback", "low"),
+                target: target_with_effort_fast("fallback", "low", true),
                 reason: ResolutionReason::Fallback
             }
         );
@@ -282,9 +311,9 @@ mod tests {
                 reason: ResolutionReason::Original
             }
         );
-        // Type hit without effort must not pull fallback effort (in-memory; YAML rejects this).
+        // Type hit without effort/fast must not pull fallback effort or fast (in-memory).
         let no_merge = Policy {
-            fallback: Some(target_with_effort("fallback", "low")),
+            fallback: Some(target_with_effort_fast("fallback", "low", true)),
             types: BTreeMap::from([("explore".into(), target("type-only"))]),
             mapping: BTreeMap::new(),
         };
@@ -295,14 +324,46 @@ mod tests {
                 reason: ResolutionReason::Type
             }
         );
+        assert!(!no_merge.resolve("explore", "original").target.fast);
+    }
+
+    #[test]
+    fn yaml_fast_defaults_false_and_rejects_non_bool() {
+        let omitted: ModelTarget = serde_yaml::from_str(r#"{model: official-A, effort: high}"#)
+            .expect("omitted fast should default");
+        assert!(!omitted.fast);
+        let explicit_false: ModelTarget =
+            serde_yaml::from_str(r#"{model: official-A, effort: high, fast: false}"#).unwrap();
+        assert!(!explicit_false.fast);
+        let explicit_true: ModelTarget =
+            serde_yaml::from_str(r#"{model: official-A, effort: high, fast: true}"#).unwrap();
+        assert!(explicit_true.fast);
+        let composer: ModelTarget =
+            serde_yaml::from_str(r#"{model: composer-2.5, fast: true}"#).unwrap();
+        assert!(composer.fast);
+        assert!(composer.effort.is_none());
+        for invalid in [
+            r#"{model: official-A, effort: high, fast: "true"}"#,
+            r#"{model: official-A, effort: high, fast: 1}"#,
+            r#"{model: official-A, effort: high, fast: yes}"#,
+        ] {
+            assert!(
+                serde_yaml::from_str::<ModelTarget>(invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 
     #[test]
     fn context_is_sorted_complete_and_version_independent() {
         let policy = Policy {
-            fallback: Some(target_with_effort("fallback", "high")),
+            fallback: Some(target_with_effort_fast("fallback", "high", true)),
             types: BTreeMap::from([
-                ("z".into(), target("composer-2.5")),
+                ("z".into(), {
+                    let mut target = target("composer-2.5");
+                    target.fast = true;
+                    target
+                }),
                 ("a".into(), target_with_effort("type-target", "medium")),
             ]),
             mapping: BTreeMap::from([(
@@ -321,9 +382,10 @@ mod tests {
         ] {
             assert!(context.contains(&format!("- {id:?}\n")));
         }
-        assert!(context.contains("model=\"type-target\" effort=\"medium\""));
-        assert!(context.contains("model=\"composer-2.5\""));
-        assert!(context.contains("Fallback: model=\"fallback\" effort=\"high\""));
+        assert!(context.contains("model=\"type-target\" effort=\"medium\" fast=false"));
+        assert!(context.contains("model=\"composer-2.5\" fast=true"));
+        assert!(context.contains("Fallback: model=\"fallback\" effort=\"high\" fast=true"));
+        assert!(context.contains("effort and fast are not merged"));
         assert!(context.contains("YAML targets must not use model \"inherit\""));
         assert!(context.find("- \"a\" ->").unwrap() < context.find("- \"z\" ->").unwrap());
         assert_eq!(

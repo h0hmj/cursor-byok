@@ -28,10 +28,11 @@ async fn fixture() -> (tempfile::TempDir, TransportRegistry) {
     (dir, registry)
 }
 
-fn child_binding(model: &str, effort: EffortAction) -> RunModelBinding {
+fn child_binding(model: &str, effort: EffortAction, fast: Option<bool>) -> RunModelBinding {
     RunModelBinding {
         model: model.into(),
         effort,
+        fast,
         role: ModelRole::Child,
     }
 }
@@ -44,12 +45,14 @@ async fn concurrent_selections_share_one_model_until_lifecycle_finishes() {
             "child",
             "model-a",
             EffortAction::Set("high".into()),
+            Some(true),
             ModelRole::Child
         ),
         registry.mark_upstream(
             "child",
             "model-b",
             EffortAction::Set("low".into()),
+            Some(false),
             ModelRole::Child
         ),
     );
@@ -75,11 +78,13 @@ async fn concurrent_selections_share_one_model_until_lifecycle_finishes() {
             "child",
             "model-c",
             EffortAction::Set("medium".into()),
+            Some(false),
             ModelRole::Child,
         )
         .await;
     assert_eq!(owned.model, "model-c");
     assert_eq!(owned.effort, EffortAction::Set("medium".into()));
+    assert_eq!(owned.fast, Some(false));
     assert_eq!(
         registry.run_model("child").await.as_deref(),
         Some("model-c")
@@ -96,6 +101,7 @@ async fn stale_upstream_completion_keeps_newer_generation_selection() {
             "child",
             "selected",
             EffortAction::Set("high".into()),
+            Some(true),
             ModelRole::Child,
         )
         .await;
@@ -104,6 +110,7 @@ async fn stale_upstream_completion_keeps_newer_generation_selection() {
             "child",
             "ignored-retry",
             EffortAction::Set("low".into()),
+            Some(false),
             ModelRole::Child,
         )
         .await;
@@ -126,7 +133,11 @@ async fn replacing_closing_local_lifecycle_takes_new_child_selection() {
         .get_or_create_for_append(
             "child",
             true,
-            Some(child_binding("model-a", EffortAction::Set("high".into()))),
+            Some(child_binding(
+                "model-a",
+                EffortAction::Set("high".into()),
+                Some(true),
+            )),
         )
         .await
         .unwrap();
@@ -138,12 +149,17 @@ async fn replacing_closing_local_lifecycle_takes_new_child_selection() {
         owned_a.as_ref().map(|value| value.effort.clone()),
         Some(EffortAction::Set("high".into()))
     );
+    assert_eq!(owned_a.as_ref().and_then(|value| value.fast), Some(true));
     first.begin_close();
     let (second, owned_b) = registry
         .get_or_create_for_append(
             "child",
             true,
-            Some(child_binding("model-b", EffortAction::Set("low".into()))),
+            Some(child_binding(
+                "model-b",
+                EffortAction::Set("low".into()),
+                Some(false),
+            )),
         )
         .await
         .unwrap();
@@ -156,6 +172,7 @@ async fn replacing_closing_local_lifecycle_takes_new_child_selection() {
         owned_b.as_ref().map(|value| value.effort.clone()),
         Some(EffortAction::Set("low".into()))
     );
+    assert_eq!(owned_b.as_ref().and_then(|value| value.fast), Some(false));
     assert_eq!(
         registry.run_model("child").await.as_deref(),
         Some("model-b")
@@ -206,10 +223,11 @@ async fn primary_model_updates_on_same_local_lifecycle() {
 async fn concurrent_admit_run_model_keeps_decoded_route_and_owned_model_aligned() {
     let (_dir, registry) = fixture().await;
     let barrier = StdArc::new(Barrier::new(2));
-    let prepare = |model: &str, effort: &str| PreparedRunModel {
+    let prepare = |model: &str, effort: &str, fast: bool| PreparedRunModel {
         original: "source".into(),
         model: model.into(),
         effort: EffortAction::Set(effort.into()),
+        fast: Some(fast),
         role: ModelRole::Child,
     };
     let left_barrier = barrier.clone();
@@ -220,20 +238,21 @@ async fn concurrent_admit_run_model_keeps_decoded_route_and_owned_model_aligned(
         async move {
             left_barrier.wait().await;
             left_registry
-                .admit_run_model("child", &prepare("model-a", "high"))
+                .admit_run_model("child", &prepare("model-a", "high", true))
                 .await
                 .unwrap()
         },
         async move {
             right_barrier.wait().await;
             right_registry
-                .admit_run_model("child", &prepare("model-b", "low"))
+                .admit_run_model("child", &prepare("model-b", "low", false))
                 .await
                 .unwrap()
         },
     );
     assert_eq!(left.model, right.model);
     assert_eq!(left.effort, right.effort);
+    assert_eq!(left.fast, right.fast);
     assert_eq!(left.local, right.local);
     assert!(!left.local);
     assert_eq!(
@@ -254,6 +273,7 @@ async fn closing_between_prepare_and_admit_uses_candidate_not_stale_pin() {
         original: "source".into(),
         model: "plugin:example/provider/a".into(),
         effort: EffortAction::Set("high".into()),
+        fast: Some(true),
         role: ModelRole::Child,
     };
     let first = registry
@@ -263,6 +283,7 @@ async fn closing_between_prepare_and_admit_uses_candidate_not_stale_pin() {
     assert!(first.local);
     assert_eq!(first.model, "plugin:example/provider/a");
     assert_eq!(first.effort, EffortAction::Set("high".into()));
+    assert_eq!(first.fast, Some(true));
     let closing = first.handle.unwrap();
     closing.begin_close();
     assert!(registry.active_child_model("local-child").await.is_none());
@@ -271,6 +292,7 @@ async fn closing_between_prepare_and_admit_uses_candidate_not_stale_pin() {
         original: "source".into(),
         model: "plugin:example/provider/b".into(),
         effort: EffortAction::Set("low".into()),
+        fast: Some(false),
         role: ModelRole::Child,
     };
     let second = registry
@@ -279,6 +301,7 @@ async fn closing_between_prepare_and_admit_uses_candidate_not_stale_pin() {
         .unwrap();
     assert_eq!(second.model, "plugin:example/provider/b");
     assert_eq!(second.effort, EffortAction::Set("low".into()));
+    assert_eq!(second.fast, Some(false));
     assert_eq!(
         registry.run_model("local-child").await.as_deref(),
         Some("plugin:example/provider/b")
