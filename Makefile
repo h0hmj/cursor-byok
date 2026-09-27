@@ -22,6 +22,7 @@ build-server:
 	cargo build --release --package cursor-server --bin cursor-server
 
 build-desktop:
+	npm --prefix apps/desktop install --include=dev
 ifeq ($(OS),Windows_NT)
 	@node -e "const { spawnSync } = require('node:child_process'); const result = spawnSync(process.execPath, ['node_modules/@tauri-apps/cli/tauri.js', 'build', '--bundles', 'nsis'], { cwd: 'apps/desktop', stdio: 'inherit' }); process.exit(result.status ?? 1)"
 else
