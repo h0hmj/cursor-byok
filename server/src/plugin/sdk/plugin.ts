@@ -1,5 +1,5 @@
 import type { ProviderSupport } from "./provider.ts";
-import type { ResourceSupport } from "./resource.ts";
+import type { ResourcePatch, ResourceSnapshot, ResourceSupport } from "./resource.ts";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -15,6 +15,8 @@ export type NetworkRequestInit = {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
+  /** 凭证交换不得进入模型调用的请求/响应日志,也不占用其 recorder。 */
+  sensitive?: boolean;
 };
 
 export type NetworkResponse = {
@@ -39,6 +41,11 @@ export type PluginContext = {
     fetch(url: string, init?: NetworkRequestInit): Promise<NetworkResponse>;
     stream(url: string, init?: NetworkRequestInit): Promise<NetworkEventStream>;
   };
+  /** 仅限宿主为本次调用选中的资源;更新成功后已持久化。 */
+  resource: {
+    read(): Promise<ResourceSnapshot>;
+    patch(patch: ResourcePatch): Promise<ResourceSnapshot>;
+  } | null;
   signal: AbortSignal;
 };
 

@@ -7,6 +7,13 @@ use crate::Result;
 /// 随二进制打包的内置插件文件;发布构建没有源码目录,靠这里预装。
 const CODEX_AUTH: &[(&str, &str)] = &[
     (
+        "auth.ts",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/build-in/codex-auth/auth.ts"
+        )),
+    ),
+    (
         "plugin.json",
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

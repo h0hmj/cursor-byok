@@ -5,10 +5,10 @@ import type {
   PluginContext,
 } from "cursor-byok:plugin";
 import type { LlmRequest, ModelEvent } from "cursor-byok:provider";
-import type { ResourceSnapshot } from "cursor-byok:resource";
+import type { ResourcePatch, ResourceSnapshot } from "cursor-byok:resource";
 import { codexDeviceOAuth } from "./oauth.ts";
-import { parseOfficialModels } from "./models.ts";
-import { buildResponsesBody } from "cursor-byok:protocol/openai-responses";
+import { codexModels, parseOfficialModels } from "./models.ts";
+import { buildResponsesBody, HttpError } from "cursor-byok:protocol/openai-responses";
 import { codexProvider, isQuotaError } from "./provider.ts";
 import {
   accountIdentity,
@@ -19,8 +19,11 @@ import {
   parseCredentialFiles,
   presentAccount,
   quotaState,
+  refreshAccount,
   RESOURCE_TYPE,
+  tokenExpiresAtMs,
 } from "./resources.ts";
+import { withAccountAuth } from "./auth.ts";
 
 function assert(condition: unknown, message = "assertion failed"): asserts condition {
   if (!condition) throw new Error(message);
@@ -40,11 +43,23 @@ function jwt(payload: Record<string, unknown>): string {
   return `header.${encoded}.signature`;
 }
 
-type RequestInit = { body?: string; headers?: Record<string, string> };
-type FetchHandler = (url: string, init?: RequestInit) => NetworkResponse;
+type RequestInit = { body?: string; headers?: Record<string, string>; sensitive?: boolean };
+type FetchHandler = (url: string, init?: RequestInit) => NetworkResponse | Promise<NetworkResponse>;
 type StreamHandler = (url: string, init?: RequestInit) => NetworkEventStream;
 
-function context(handlers: { fetch?: FetchHandler; stream?: StreamHandler }): PluginContext {
+function context(handlers: {
+  fetch?: FetchHandler;
+  stream?: StreamHandler;
+  resource?: ResourceSnapshot;
+  patches?: ResourcePatch[];
+}): PluginContext {
+  let resource = handlers.resource ?? snapshot({
+    accessToken: "access-secret",
+    refreshToken: null,
+    accountId: "acct-1",
+    displayName: "person@example.com",
+    quota: null,
+  });
   return {
     network: {
       fetch: (url, init) => {
@@ -54,6 +69,24 @@ function context(handlers: { fetch?: FetchHandler; stream?: StreamHandler }): Pl
       stream: (url, init) => {
         if (!handlers.stream) throw new Error("stream was not expected");
         return Promise.resolve(handlers.stream(url, init));
+      },
+    },
+    resource: {
+      read: () => Promise.resolve(resource),
+      patch: (patch) => {
+        handlers.patches?.push(patch);
+        resource = {
+          ...resource,
+          ...(patch.privateData === undefined ? {} : { privateData: patch.privateData }),
+          ...(patch.privateDataFields === undefined ? {} : {
+            privateData: {
+              ...resource.privateData as Record<string, JsonValue>,
+              ...patch.privateDataFields,
+            },
+          }),
+          ...(patch.state === undefined ? {} : { state: patch.state }),
+        };
+        return Promise.resolve(resource);
       },
     },
     signal: new AbortController().signal,
@@ -240,7 +273,7 @@ Deno.test("reset card action consumes a selected card and refreshes quota state"
   );
   assertEquals(requestNumber, 4);
   assertEquals(result.cards, []);
-  const quota = (result.patch?.privateData as Record<string, unknown>).quota as Record<
+  const quota = result.patch?.privateDataFields?.quota as Record<
     string,
     unknown
   >;
@@ -363,6 +396,7 @@ Deno.test("invoke streams normalized events from the Codex Responses API", async
     },
     { emit: (event) => events.push(event) },
     context({
+      resource: snapshot(draft.privateData),
       stream: (url, init) => {
         assertEquals(url, "https://chatgpt.com/backend-api/codex/responses");
         requestBody = init?.body ?? "";
@@ -466,6 +500,7 @@ Deno.test("invoke streams incremental tool calls and replays reasoning items", a
     },
     { emit: (event) => events.push(event) },
     context({
+      resource: snapshot(draft.privateData),
       stream: () => ({
         status: 200,
         headers: {},
@@ -512,6 +547,7 @@ Deno.test("invoke maps quota failures to a cooling resource error", async () => 
     },
     { emit: () => {} },
     context({
+      resource: snapshot(draft.privateData),
       stream: () => ({
         status: 429,
         headers: {},
@@ -524,5 +560,451 @@ Deno.test("invoke maps quota failures to a cooling resource error", async () => 
   assert(
     result.patch.state.retryAtMs !== undefined && result.patch.state.retryAtMs > Date.now(),
     "cooling should carry the parsed reset time",
+  );
+});
+
+function account(
+  accessToken: string,
+  refreshToken: string | null = "refresh-old",
+): ResourceSnapshot {
+  return snapshot({
+    accessToken,
+    refreshToken,
+    accountId: "acct-1",
+    displayName: "person@example.com",
+    quota: null,
+  });
+}
+
+function expiringToken(seconds: number): string {
+  return jwt({
+    exp: Math.floor(Date.now() / 1000) + seconds,
+    "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+  });
+}
+
+function successStream(): NetworkEventStream {
+  return {
+    status: 200,
+    headers: {},
+    lines: sse(['data: {"type":"response.completed","response":{}}']),
+  };
+}
+
+function invokeAccount(resource: ResourceSnapshot, ctx: PluginContext, events: ModelEvent[] = []) {
+  return codexProvider.invoke(
+    {
+      model: { id: "gpt-test", displayName: "GPT Test" },
+      resource,
+      request: request(),
+    },
+    { emit: (event) => events.push(event) },
+    ctx,
+  );
+}
+
+Deno.test("token expiry reads JWT exp without assuming opaque tokens are expired", () => {
+  assertEquals(tokenExpiresAtMs(jwt({ exp: 1_800_000_000 })), 1_800_000_000_000);
+  assertEquals(tokenExpiresAtMs("opaque"), null);
+  assertEquals(tokenExpiresAtMs(jwt({})), null);
+  assertEquals(tokenExpiresAtMs("header.invalid.signature"), null);
+});
+
+for (const seconds of [-60, 120]) {
+  Deno.test(`invoke refreshes tokens with ${seconds}s remaining before opening the stream`, async () => {
+    const resource = account(expiringToken(seconds));
+    const accessToken = expiringToken(3600);
+    const patches: ResourcePatch[] = [];
+    let refreshes = 0;
+    const ctx = context({
+      resource,
+      patches,
+      fetch: (url, init) => {
+        refreshes++;
+        assertEquals(url, "https://auth.openai.com/oauth/token");
+        assertEquals(init?.sensitive, true);
+        const params = new URLSearchParams(init?.body);
+        assertEquals(params.get("grant_type"), "refresh_token");
+        assertEquals(params.get("client_id"), "app_EMoamEEZ73f0CkXaXp7hrann");
+        assertEquals(params.get("refresh_token"), "refresh-old");
+        return {
+          status: 200,
+          headers: {},
+          body: JSON.stringify({ access_token: accessToken, refresh_token: "refresh-new" }),
+        };
+      },
+      stream: (_url, init) => {
+        assertEquals(init?.headers?.authorization, `Bearer ${accessToken}`);
+        assert(patches.length === 1, "credentials must be saved before the model request");
+        return successStream();
+      },
+    });
+    assertEquals(await invokeAccount(resource, ctx), { status: "completed" });
+    assertEquals(refreshes, 1);
+    const saved = await ctx.resource!.read();
+    assertEquals((saved.privateData as Record<string, unknown>).refreshToken, "refresh-new");
+    assertEquals(saved.state, { status: "ready" });
+    assert(!JSON.stringify(presentAccount(saved)).includes("refresh-new"));
+  });
+}
+
+Deno.test("401 refreshes an opaque token and retries with the same body and cache headers", async () => {
+  const resource = account("old-access");
+  let streams = 0;
+  let refreshes = 0;
+  const bodies: string[] = [];
+  const ctx = context({
+    resource,
+    fetch: () => {
+      refreshes++;
+      return { status: 200, headers: {}, body: '{"access_token":"new-access"}' };
+    },
+    stream: (_url, init) => {
+      streams++;
+      bodies.push(init?.body ?? "");
+      assertEquals(init?.headers?.["session-id"], "conversation-1");
+      assertEquals(init?.headers?.["ChatGPT-Account-Id"], "acct-1");
+      assertEquals(
+        init?.headers?.authorization,
+        streams === 1 ? "Bearer old-access" : "Bearer new-access",
+      );
+      return streams === 1
+        ? {
+          status: 401,
+          headers: {},
+          lines: sse(['{"message":"Provided authentication token is expired"}']),
+        }
+        : successStream();
+    },
+  });
+  assertEquals(await invokeAccount(resource, ctx), { status: "completed" });
+  assertEquals(streams, 2);
+  assertEquals(refreshes, 1);
+  assertEquals(bodies[0], bodies[1]);
+  assertEquals((await ctx.resource!.read()).privateData, {
+    accessToken: "new-access",
+    refreshToken: "refresh-old",
+    accountId: "acct-1",
+    displayName: "person@example.com",
+    quota: null,
+  });
+});
+
+Deno.test("concurrent expired snapshots share one refresh and read persisted credentials", async () => {
+  const resource = account(expiringToken(-60));
+  let refreshes = 0;
+  let streams = 0;
+  const ctx = context({
+    resource,
+    fetch: async () => {
+      refreshes++;
+      await Promise.resolve();
+      return {
+        status: 200,
+        headers: {},
+        body: JSON.stringify({
+          access_token: expiringToken(3600),
+          refresh_token: "rotated-refresh",
+        }),
+      };
+    },
+    stream: () => {
+      streams++;
+      return successStream();
+    },
+  });
+  assertEquals(await Promise.all([invokeAccount(resource, ctx), invokeAccount(resource, ctx)]), [
+    { status: "completed" },
+    { status: "completed" },
+  ]);
+  assertEquals(refreshes, 1);
+  assertEquals(streams, 2);
+  assertEquals(await invokeAccount(resource, ctx), { status: "completed" });
+  assert(refreshes === 1, "stale snapshots must not reuse rotated refresh tokens");
+});
+
+Deno.test("concurrent 401 responses do not refresh the same rejected token twice", async () => {
+  const resource = account("old-access");
+  let refreshes = 0;
+  let rejected = 0;
+  const ctx = context({
+    resource,
+    fetch: () => {
+      refreshes++;
+      return {
+        status: 200,
+        headers: {},
+        body: '{"access_token":"new-access","refresh_token":"rotated"}',
+      };
+    },
+    stream: (_url, init) => {
+      if (init?.headers?.authorization === "Bearer old-access") {
+        rejected++;
+        return { status: 401, headers: {}, lines: sse(["expired"]) };
+      }
+      return successStream();
+    },
+  });
+  const results = await Promise.all([invokeAccount(resource, ctx), invokeAccount(resource, ctx)]);
+  assertEquals(results, [{ status: "completed" }, { status: "completed" }]);
+  assertEquals(rejected, 2);
+  assertEquals(refreshes, 1);
+});
+
+for (
+  const error of [
+    "invalid_grant",
+    "refresh_token_expired",
+    "refresh_token_reused",
+    "refresh_token_invalidated",
+  ]
+) {
+  Deno.test(`permanent refresh failure ${error} marks the account invalid without leaking credentials`, async () => {
+    const resource = account(expiringToken(-60));
+    const ctx = context({
+      resource,
+      fetch: () => ({
+        status: 400,
+        headers: {},
+        body: JSON.stringify({
+          error: { code: error, message: "do not expose refresh-old" },
+        }),
+      }),
+    });
+    const result = await invokeAccount(resource, ctx);
+    assertEquals(result.status, "resource-error");
+    assertEquals((await ctx.resource!.read()).state.status, "invalid");
+    assert(!JSON.stringify(result).includes("refresh-old"));
+  });
+}
+
+for (const status of [429, 500]) {
+  Deno.test(`temporary token endpoint HTTP ${status} does not invalidate the account and can be retried`, async () => {
+    const resource = account(expiringToken(-60));
+    let calls = 0;
+    const ctx = context({
+      resource,
+      fetch: () => {
+        calls++;
+        return calls === 1 ? { status, headers: {}, body: "private refresh-old" } : {
+          status: 200,
+          headers: {},
+          body: JSON.stringify({ access_token: expiringToken(3600) }),
+        };
+      },
+      stream: () => successStream(),
+    });
+    const result = await invokeAccount(resource, ctx);
+    assertEquals(result.status, "request-error");
+    assertEquals((await ctx.resource!.read()).state.status, "ready");
+    assert(!JSON.stringify(result).includes("refresh-old"));
+    assertEquals(await invokeAccount(resource, ctx), { status: "completed" });
+    assertEquals(calls, 2);
+  });
+}
+
+Deno.test("401 without a refresh token requires sign-in without calling the token endpoint", async () => {
+  const resource = account("old-access", null);
+  const ctx = context({
+    resource,
+    stream: () => ({ status: 401, headers: {}, lines: sse(["expired"]) }),
+  });
+  assertEquals((await invokeAccount(resource, ctx)).status, "resource-error");
+  assertEquals((await ctx.resource!.read()).state.status, "invalid");
+});
+
+Deno.test("a second 401 stops after one retry and keeps rotated credentials persisted", async () => {
+  const resource = account("old-access");
+  let refreshes = 0;
+  let streams = 0;
+  const ctx = context({
+    resource,
+    fetch: () => {
+      refreshes++;
+      return {
+        status: 200,
+        headers: {},
+        body: '{"access_token":"new-access","refresh_token":"rotated"}',
+      };
+    },
+    stream: () => {
+      streams++;
+      return { status: 401, headers: {}, lines: sse(["expired"]) };
+    },
+  });
+  assertEquals((await invokeAccount(resource, ctx)).status, "resource-error");
+  assertEquals(refreshes, 1);
+  assertEquals(streams, 2);
+  assertEquals((await ctx.resource!.read()).state.status, "invalid");
+  assertEquals(
+    ((await ctx.resource!.read()).privateData as Record<string, unknown>).refreshToken,
+    "rotated",
+  );
+});
+
+Deno.test("model failure after renewal does not lose the new refresh token", async () => {
+  const resource = account(expiringToken(-60));
+  const ctx = context({
+    resource,
+    fetch: () => ({
+      status: 200,
+      headers: {},
+      body: '{"access_token":"new-access","refresh_token":"rotated"}',
+    }),
+    stream: () => ({ status: 503, headers: {}, lines: sse(["unavailable"]) }),
+  });
+  assertEquals((await invokeAccount(resource, ctx)).status, "request-error");
+  const saved = await ctx.resource!.read();
+  assertEquals((saved.privateData as Record<string, unknown>).refreshToken, "rotated");
+  assertEquals(saved.state.status, "ready");
+});
+
+Deno.test("a stream failure after output is never replayed", async () => {
+  const resource = account("old-access");
+  const events: ModelEvent[] = [];
+  let streams = 0;
+  const ctx = context({
+    resource,
+    stream: () => {
+      streams++;
+      return {
+        status: 200,
+        headers: {},
+        lines: (async function* () {
+          yield 'data: {"type":"response.output_text.delta","delta":"partial"}';
+          throw new HttpError(401, "expired after output");
+        })(),
+      };
+    },
+  });
+  assertEquals((await invokeAccount(resource, ctx, events)).status, "resource-error");
+  assertEquals(streams, 1);
+  assert(events.some((event) => event.type === "text-delta"));
+});
+
+Deno.test("manual quota refresh renews and recovers a previously invalid account", async () => {
+  const resource = { ...account(expiringToken(-60)), state: { status: "invalid" as const } };
+  let calls = 0;
+  const ctx = context({
+    resource,
+    fetch: (url, init) => {
+      calls++;
+      if (url === "https://auth.openai.com/oauth/token") {
+        return {
+          status: 200,
+          headers: {},
+          body: '{"access_token":"new-access","refresh_token":"rotated"}',
+        };
+      }
+      assertEquals(init?.headers?.authorization, "Bearer new-access");
+      return { status: 200, headers: {}, body: '{"plan_type":"plus"}' };
+    },
+  });
+  const patch = await refreshAccount(resource, ctx);
+  assertEquals(calls, 2);
+  assertEquals(patch.state, { status: "ready" });
+  assertEquals(
+    ((await ctx.resource!.read()).privateData as Record<string, unknown>).refreshToken,
+    "rotated",
+  );
+});
+
+Deno.test("quota lookup 401 renews and retries instead of invalidating a refreshable account", async () => {
+  const resource = account("old-access");
+  const urls: string[] = [];
+  const ctx = context({
+    resource,
+    fetch: (url, init) => {
+      urls.push(url);
+      if (url === "https://auth.openai.com/oauth/token") {
+        return { status: 200, headers: {}, body: '{"access_token":"new-access"}' };
+      }
+      return init?.headers?.authorization === "Bearer old-access"
+        ? { status: 401, headers: {}, body: "expired" }
+        : { status: 200, headers: {}, body: "{}" };
+    },
+  });
+  assertEquals((await refreshAccount(resource, ctx)).state, { status: "ready" });
+  assertEquals(urls.length, 3);
+});
+
+Deno.test("model discovery renews and persists tokens before syncing models", async () => {
+  const resource = account(expiringToken(-60));
+  const ctx = context({
+    resource,
+    fetch: (url, init) => {
+      if (url === "https://auth.openai.com/oauth/token") {
+        return {
+          status: 200,
+          headers: {},
+          body: '{"access_token":"new-access","refresh_token":"rotated"}',
+        };
+      }
+      assertEquals(init?.headers?.authorization, "Bearer new-access");
+      return { status: 200, headers: {}, body: '{"models":[{"slug":"gpt-test"}]}' };
+    },
+  });
+  const models = await codexModels.list({ resource }, ctx);
+  assertEquals(models.map((model) => model.id), ["gpt-test"]);
+  assertEquals(
+    ((await ctx.resource!.read()).privateData as Record<string, unknown>).refreshToken,
+    "rotated",
+  );
+});
+
+Deno.test("reset-card lookups recover from 401 without replaying card consumption", async () => {
+  const resource = account("old-access");
+  let consumption = 0;
+  let lookups = 0;
+  const ctx = context({
+    resource,
+    fetch: (url, init) => {
+      if (url === "https://auth.openai.com/oauth/token") {
+        return { status: 200, headers: {}, body: '{"access_token":"new-access"}' };
+      }
+      if (url.endsWith("/consume")) {
+        consumption++;
+        return { status: 200, headers: {}, body: "{}" };
+      }
+      if (url.endsWith("/usage")) return { status: 200, headers: {}, body: "{}" };
+      lookups++;
+      if (lookups === 2 && init?.headers?.authorization === "Bearer old-access") {
+        return { status: 401, headers: {}, body: "expired" };
+      }
+      return {
+        status: 200,
+        headers: {},
+        body: JSON.stringify(
+          consumption
+            ? { credits: [], available_count: 0 }
+            : { credits: [{ id: "card-1", status: "available" }], available_count: 1 },
+        ),
+      };
+    },
+  });
+  const result = await consumeResetCardAction.run(resource, { cardId: "card-1" }, ctx);
+  assertEquals(result.cards, []);
+  assertEquals(consumption, 1);
+  assertEquals(lookups, 3);
+});
+
+Deno.test("refresh cancellation releases the account queue for the next request", async () => {
+  const resource = account(expiringToken(-60));
+  const ctx = context({
+    resource,
+    fetch: () => ({ status: 200, headers: {}, body: '{"access_token":"new-access"}' }),
+  });
+  const controller = new AbortController();
+  controller.abort();
+  let cancelled = false;
+  try {
+    await withAccountAuth(resource, { ...ctx, signal: controller.signal }, () => Promise.resolve());
+  } catch {
+    cancelled = true;
+  }
+  assert(cancelled);
+  assertEquals(
+    await withAccountAuth(resource, ctx, (data) => Promise.resolve(data.accessToken)),
+    "new-access",
   );
 });

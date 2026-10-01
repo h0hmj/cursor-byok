@@ -7,6 +7,7 @@ import type {
 import type { PluginContext } from "cursor-byok:plugin";
 import { HttpError, streamOpenAiResponses } from "cursor-byok:protocol/openai-responses";
 import { codexModels, reasoningEfforts } from "./models.ts";
+import { CodexAuthorizationError, withAccountAuth } from "./auth.ts";
 import {
   type AccountData,
   accountData,
@@ -57,7 +58,7 @@ function headers(data: AccountData, cacheKey: string | null): Record<string, str
     authorization: `Bearer ${data.accessToken}`,
     originator: "codex_cli_rs",
   };
-  const accountId = chatGptAccountId(data.accessToken);
+  const accountId = data.accountId ?? chatGptAccountId(data.accessToken);
   if (accountId) result["ChatGPT-Account-Id"] = accountId;
   // Codex 后端的缓存亲和契约:session-id / thread-id / prompt_cache_key
   // 三者同源(见 codex-rs client.rs);缺头会导致请求落在随机分片上。
@@ -89,26 +90,38 @@ async function invoke(
   const effort = reasoning.effort !== null && efforts.includes(reasoning.effort)
     ? reasoning.effort
     : null;
+  let emitted = false;
   try {
-    await streamOpenAiResponses(
-      {
-        url: RESPONSES_URL,
-        model: input.model.id,
-        // Codex 订阅端点不接受 max_output_tokens;fast 档位经协议库映射为
-        // service_tier: "priority" 后透传。
-        request: {
-          ...input.request,
-          reasoning: { enabled: reasoning.enabled, effort },
-          maxOutputTokens: null,
+    await withAccountAuth(input.resource, context, async (authorized) => {
+      data = authorized;
+      await streamOpenAiResponses(
+        {
+          url: RESPONSES_URL,
+          model: input.model.id,
+          // Codex 订阅端点不接受 max_output_tokens;fast 档位经协议库映射为
+          // service_tier: "priority" 后透传。
+          request: {
+            ...input.request,
+            reasoning: { enabled: reasoning.enabled, effort },
+            maxOutputTokens: null,
+          },
+          headers: headers(data, input.request.cacheKey),
+          extraBody: { store: false },
         },
-        headers: headers(data, input.request.cacheKey),
-        extraBody: { store: false },
-      },
-      output,
-      context,
-    );
+        {
+          emit: (event) => {
+            emitted = true;
+            output.emit(event);
+          },
+        },
+        context,
+      );
+    }, () => !emitted);
     return { status: "completed" };
   } catch (error) {
+    if (error instanceof CodexAuthorizationError) {
+      return invalidResult(error.message, error.message);
+    }
     if (error instanceof HttpError) {
       if (error.status === 401) {
         return invalidResult(error.message, "ChatGPT authorization expired; sign in again");

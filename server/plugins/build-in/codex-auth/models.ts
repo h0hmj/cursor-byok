@@ -1,6 +1,8 @@
 import type { JsonValue } from "cursor-byok:plugin";
 import type { ModelDefinition, ModelSnapshot, ModelSupport } from "cursor-byok:model";
-import { accountData, accountHeaders } from "./resources.ts";
+import { accountHeaders } from "./resources.ts";
+import { HttpError } from "cursor-byok:protocol/openai-responses";
+import { withAccountAuth } from "./auth.ts";
 
 const MODELS_URL = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0";
 
@@ -105,24 +107,26 @@ export function reasoningEfforts(model: ModelSnapshot): string[] {
 export const codexModels: ModelSupport = {
   list: async ({ resource }, context): Promise<ModelDefinition[]> => {
     if (!resource) throw new Error("add a ChatGPT account before syncing Codex models");
-    const data = accountData(resource);
-    const response = await context.network.fetch(MODELS_URL, {
-      method: "GET",
-      headers: accountHeaders(data),
+    return await withAccountAuth(resource, context, async (data) => {
+      const response = await context.network.fetch(MODELS_URL, {
+        method: "GET",
+        headers: accountHeaders(data),
+      });
+      if (response.status < 200 || response.status >= 300) {
+        if (response.status === 401) throw new HttpError(response.status, response.body);
+        throw new Error(`Codex model discovery failed (HTTP ${response.status}): ${response.body}`);
+      }
+      let body: unknown;
+      try {
+        body = JSON.parse(response.body) as JsonValue;
+      } catch {
+        throw new Error("Codex model discovery returned invalid JSON");
+      }
+      const models = parseOfficialModels(body);
+      if (models.length === 0) {
+        throw new Error("Codex model discovery returned no supported models");
+      }
+      return models;
     });
-    if (response.status < 200 || response.status >= 300) {
-      throw new Error(`Codex model discovery failed (HTTP ${response.status}): ${response.body}`);
-    }
-    let body: unknown;
-    try {
-      body = JSON.parse(response.body) as JsonValue;
-    } catch {
-      throw new Error("Codex model discovery returned invalid JSON");
-    }
-    const models = parseOfficialModels(body);
-    if (models.length === 0) {
-      throw new Error("Codex model discovery returned no supported models");
-    }
-    return models;
   },
 };

@@ -32,6 +32,8 @@ export type ResourceSnapshot = {
 /** 宿主原子应用到单条资源上的部分更新。 */
 export type ResourcePatch = {
   privateData?: JsonValue;
+  /** 原子合并私有对象的指定字段,避免额度更新覆盖并发续期后的凭证。 */
+  privateDataFields?: { [key: string]: JsonValue };
   state?: ResourceState;
 };
 

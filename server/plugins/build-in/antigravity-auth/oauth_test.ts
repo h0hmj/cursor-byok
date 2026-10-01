@@ -28,6 +28,7 @@ function context(requests: Array<{ url: string; body?: string }>): PluginContext
       },
       stream: () => Promise.reject(new Error("stream is not expected")),
     },
+    resource: null,
     signal: new AbortController().signal,
   };
 }

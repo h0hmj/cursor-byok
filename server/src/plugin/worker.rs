@@ -21,6 +21,7 @@ use super::{
     catalog::PluginEntry,
     definition::{file_url, PluginDefinitionLoader},
     protocol::{HostMessage, WorkerMessage},
+    state::{PluginStateStore, ResourcePatch},
 };
 use crate::{provider::CallRecorder, store::Store, Error, Result};
 
@@ -63,6 +64,7 @@ struct InvocationState {
     cancellation: CancellationToken,
     recorder: Option<CallRecorder>,
     recorder_claimed: AtomicBool,
+    resource: Option<(String, String)>,
 }
 
 impl InvocationState {
@@ -81,6 +83,7 @@ struct HostContext {
     plugin_id: String,
     network_hosts: Arc<HashSet<String>>,
     store: Store,
+    state: PluginStateStore,
     invocations: Arc<Mutex<HashMap<String, Arc<InvocationState>>>>,
     streams: Arc<Mutex<HashMap<String, StreamLines>>>,
 }
@@ -91,6 +94,7 @@ impl PluginWorker {
         executable: PathBuf,
         loader: PluginDefinitionLoader,
         store: Store,
+        state: PluginStateStore,
     ) -> Self {
         let plugin_id = plugin.manifest.id.clone();
         Self {
@@ -107,6 +111,7 @@ impl PluginWorker {
                             .collect(),
                     ),
                     store,
+                    state,
                     invocations: Arc::new(Mutex::new(HashMap::new())),
                     streams: Arc::new(Mutex::new(HashMap::new())),
                 },
@@ -169,6 +174,12 @@ impl PluginWorker {
                 cancellation: request_cancellation.clone(),
                 recorder,
                 recorder_claimed: AtomicBool::new(false),
+                resource: params.get("resource").and_then(|resource| {
+                    Some((
+                        resource.get("type")?.as_str()?.to_owned(),
+                        resource.get("id")?.as_str()?.to_owned(),
+                    ))
+                }),
             }),
         );
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -448,6 +459,34 @@ impl HostContext {
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
         match method {
+            "resource.read" | "resource.patch" => {
+                let invocation = self.invocations.lock().await.get(request_id).cloned();
+                let (resource_type, resource_id) = invocation
+                    .as_ref()
+                    .and_then(|invocation| invocation.resource.as_ref())
+                    .ok_or_else(|| {
+                        Error::Protocol("plugin call has no selected resource".into())
+                    })?;
+                if method == "resource.patch" {
+                    let patch: ResourcePatch = serde_json::from_value(
+                        params
+                            .get("patch")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    )?;
+                    self.state
+                        .apply_patch(&self.plugin_id, resource_type, resource_id, patch)
+                        .await?;
+                }
+                let record = self
+                    .state
+                    .resources(&self.plugin_id, resource_type)
+                    .await?
+                    .into_iter()
+                    .find(|record| record.id == *resource_id)
+                    .ok_or_else(|| Error::RunNotFound(format!("plugin resource {resource_id}")))?;
+                Ok(record.snapshot(resource_type))
+            }
             "network.fetch" => self.fetch(request_id, params).await,
             "network.stream.open" => self.stream_open(request_id, params).await,
             "network.stream.read" => self.stream_read(params).await,
@@ -519,7 +558,9 @@ impl HostContext {
             .as_ref()
             .map(|state| state.cancellation.clone())
             .unwrap_or_default();
-        let recorder = invocation.and_then(|state| state.claim_recorder());
+        let recorder = invocation
+            .filter(|_| params.get("sensitive").and_then(serde_json::Value::as_bool) != Some(true))
+            .and_then(|state| state.claim_recorder());
         if let Some(recorder) = &recorder {
             let (headers, body) = recorded_network_request(params)?;
             recorder.request(headers, &body).await?;
@@ -775,7 +816,11 @@ mod tests {
         })
     }
 
-    async fn host_with_recorder(store: Store, recorder: CallRecorder) -> HostContext {
+    async fn host_with_recorder(
+        store: Store,
+        recorder: CallRecorder,
+        root: &std::path::Path,
+    ) -> HostContext {
         let invocations = Arc::new(Mutex::new(HashMap::new()));
         invocations.lock().await.insert(
             "invocation".into(),
@@ -783,12 +828,16 @@ mod tests {
                 cancellation: CancellationToken::new(),
                 recorder: Some(recorder),
                 recorder_claimed: AtomicBool::new(false),
+                resource: None,
             }),
         );
         HostContext {
             plugin_id: "test".into(),
             network_hosts: Arc::new(HashSet::from(["example.com".into()])),
             store,
+            state: PluginStateStore::new(
+                super::super::data::PluginDataStore::for_test(root.join("plugins")).unwrap(),
+            ),
             invocations,
             streams: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -809,9 +858,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sensitive_network_calls_do_not_record_or_claim_the_model_recorder() {
+        let (directory, store, recorder) = recorder(true, "private-auth").await;
+        let host = host_with_recorder(store.clone(), recorder, directory.path()).await;
+        let mut params = network_params();
+        params["sensitive"] = serde_json::json!(true);
+        params["body"] = serde_json::json!("grant_type=refresh_token&refresh_token=private");
+        let (_, _, observed) = host.request("invocation", &params).await.unwrap();
+        assert!(observed.is_none());
+        assert!(store
+            .llm_call_request("private-auth")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .llm_call_chunks("private-auth")
+            .await
+            .unwrap()
+            .is_empty());
+
+        let (_, _, observed) = host.request("invocation", &network_params()).await.unwrap();
+        assert!(
+            observed.is_some(),
+            "the model request must still claim its recorder"
+        );
+        let recorded = store
+            .llm_call_request("private-auth")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recorded.body,
+            serde_json::json!({ "model": "test", "stream": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_host_calls_are_bound_to_the_selected_account_and_persist_immediately() {
+        let (directory, store, recorder) = recorder(false, "resource-auth").await;
+        let host = host_with_recorder(store, recorder, directory.path()).await;
+        host.state
+            .upsert_resources(
+                "test",
+                "account",
+                vec![
+                    super::super::state::ResourceDraft {
+                        key: "selected".into(),
+                        private_data: serde_json::json!({"token":"old"}),
+                        state: None,
+                    },
+                    super::super::state::ResourceDraft {
+                        key: "other".into(),
+                        private_data: serde_json::json!({"token":"untouched"}),
+                        state: None,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        let records = host.state.resources("test", "account").await.unwrap();
+        host.invocations.lock().await.insert(
+            "selected-call".into(),
+            Arc::new(InvocationState {
+                cancellation: CancellationToken::new(),
+                recorder: None,
+                recorder_claimed: AtomicBool::new(false),
+                resource: Some(("account".into(), records[0].id.clone())),
+            }),
+        );
+        assert!(host
+            .call("invocation", "resource.read", serde_json::json!({}))
+            .await
+            .is_err());
+        assert!(host
+            .call("unknown-call", "resource.patch", serde_json::json!({}))
+            .await
+            .is_err());
+        let saved = host
+            .call(
+                "selected-call",
+                "resource.patch",
+                serde_json::json!({
+                    "resourceId": records[1].id,
+                    "patch": {"privateData":{"token":"rotated"}}
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved["id"], records[0].id);
+        let loaded = host
+            .call("selected-call", "resource.read", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(loaded["privateData"]["token"], "rotated");
+        let records = host.state.resources("test", "account").await.unwrap();
+        assert_eq!(records[0].private_data["token"], "rotated");
+        assert_eq!(records[1].private_data["token"], "untouched");
+    }
+
+    #[tokio::test]
     async fn detailed_plugin_network_recording_persists_request_and_raw_response() {
         let (_directory, store, recorder) = recorder(true, "detailed-plugin").await;
-        let host = host_with_recorder(store.clone(), recorder.clone()).await;
+        let host = host_with_recorder(store.clone(), recorder.clone(), _directory.path()).await;
         let params = network_params();
         let (_, _, first_recorder) = host.request("invocation", &params).await.unwrap();
         let (_, _, second_recorder) = host.request("invocation", &params).await.unwrap();
@@ -860,7 +1008,7 @@ mod tests {
     #[tokio::test]
     async fn standard_plugin_network_recording_keeps_metrics_without_payloads() {
         let (_directory, store, recorder) = recorder(false, "standard-plugin").await;
-        let host = host_with_recorder(store.clone(), recorder.clone()).await;
+        let host = host_with_recorder(store.clone(), recorder.clone(), _directory.path()).await;
         let params = network_params();
         let (_, body) = recorded_network_request(&params).unwrap();
         let request_bytes = serde_json::to_string(&body).unwrap().len() as i64;

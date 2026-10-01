@@ -1,4 +1,6 @@
 import type { JsonValue, PluginContext } from "cursor-byok:plugin";
+import { HttpError } from "cursor-byok:protocol/openai-responses";
+import { CodexAuthorizationError, withAccountAuth } from "./auth.ts";
 import type {
   ResourceAction,
   ResourceActionCard,
@@ -89,6 +91,11 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 
 function claim(payload: Record<string, unknown> | null, key: string): string | null {
   return payload ? text(payload[key]) : null;
+}
+
+export function tokenExpiresAtMs(accessToken: string): number | null {
+  const expiresAt = number(decodeJwtPayload(accessToken)?.exp);
+  return expiresAt === null ? null : expiresAt * 1000;
 }
 
 export function chatGptAccountId(accessToken: string): string | null {
@@ -297,7 +304,7 @@ export function quotaExhaustedPatch(
     updatedAtMs: nowMs,
   };
   return {
-    privateData: { ...data, quota } as unknown as JsonValue,
+    privateDataFields: { quota: quota as unknown as JsonValue },
     state: quotaState(quota, nowMs),
   };
 }
@@ -313,6 +320,7 @@ async function fetchResetCredits(
     headers: accountHeaders(data),
   });
   if (response.status < 200 || response.status >= 300) {
+    if (response.status === 401) throw new HttpError(response.status, response.body);
     throw new Error(
       `Codex reset card lookup failed (HTTP ${response.status}): ${response.body}`,
     );
@@ -378,7 +386,11 @@ async function listResetCards(
   _input: JsonValue,
   context: PluginContext,
 ): Promise<ResourceActionResult> {
-  const result = await fetchResetCredits(accountData(resource), context);
+  const result = await withAccountAuth(
+    resource,
+    context,
+    (data) => fetchResetCredits(data, context),
+  );
   return {
     title: { "en-US": "Codex reset cards", "zh-CN": "Codex 重置卡" },
     description: actionDescription(result.availableCount),
@@ -395,28 +407,35 @@ async function consumeResetCard(
   const creditId = text(inputObject?.creditId ?? inputObject?.cardId);
   if (!creditId) throw new Error("A reset card ID is required");
 
-  const data = accountData(resource);
-  const available = await fetchResetCredits(data, context);
+  const available = await withAccountAuth(
+    resource,
+    context,
+    (data) => fetchResetCredits(data, context),
+  );
   const card = available.cards.find((item) => item.id === creditId && item.status === "available");
   if (!card) throw new Error("The selected reset card is not available");
 
-  const response = await context.network.fetch(RESET_CREDITS_CONSUME_URL, {
-    method: "POST",
-    headers: { ...accountHeaders(data), "content-type": "application/json" },
-    body: JSON.stringify({ credit_id: creditId, redeem_request_id: crypto.randomUUID() }),
+  const redeemRequestId = crypto.randomUUID();
+  await withAccountAuth(resource, context, async (data) => {
+    const response = await context.network.fetch(RESET_CREDITS_CONSUME_URL, {
+      method: "POST",
+      headers: { ...accountHeaders(data), "content-type": "application/json" },
+      body: JSON.stringify({ credit_id: creditId, redeem_request_id: redeemRequestId }),
+    });
+    if (response.status < 200 || response.status >= 300) {
+      if (response.status === 401) throw new HttpError(response.status, response.body);
+      throw new Error(
+        `Codex reset card consumption failed (HTTP ${response.status}): ${response.body}`,
+      );
+    }
   });
-  if (response.status < 200 || response.status >= 300) {
-    throw new Error(
-      `Codex reset card consumption failed (HTTP ${response.status}): ${response.body}`,
-    );
-  }
 
   const patch = await refreshAccount(resource, context);
-  const refreshedResource: ResourceSnapshot = {
-    ...resource,
-    ...(patch.privateData ? { privateData: patch.privateData } : {}),
-  };
-  const refreshed = await fetchResetCredits(accountData(refreshedResource), context);
+  const refreshed = await withAccountAuth(
+    resource,
+    context,
+    (data) => fetchResetCredits(data, context),
+  );
   return {
     title: { "en-US": "Codex reset card used", "zh-CN": "Codex 重置卡已使用" },
     description: actionDescription(refreshed.availableCount),
@@ -492,30 +511,34 @@ export async function refreshAccount(
   resource: ResourceSnapshot,
   context: PluginContext,
 ): Promise<ResourcePatch> {
-  const data = accountData(resource);
-  const response = await context.network.fetch(USAGE_URL, {
-    method: "GET",
-    headers: accountHeaders(data),
-  });
-  if (response.status < 200 || response.status >= 300) {
-    if (response.status === 401) {
-      return {
-        state: { status: "invalid", message: "ChatGPT authorization expired; sign in again" },
-      };
-    }
-    throw new Error(`Codex usage lookup failed (HTTP ${response.status}): ${response.body}`);
-  }
-  let body: unknown;
   try {
-    body = JSON.parse(response.body);
-  } catch {
-    throw new Error("Codex usage lookup returned invalid JSON");
+    return await withAccountAuth(resource, context, async (data) => {
+      const response = await context.network.fetch(USAGE_URL, {
+        method: "GET",
+        headers: accountHeaders(data),
+      });
+      if (response.status < 200 || response.status >= 300) {
+        if (response.status === 401) throw new HttpError(response.status, response.body);
+        throw new Error(`Codex usage lookup failed (HTTP ${response.status}): ${response.body}`);
+      }
+      let body: unknown;
+      try {
+        body = JSON.parse(response.body);
+      } catch {
+        throw new Error("Codex usage lookup returned invalid JSON");
+      }
+      const quota = parseCodexUsage(body);
+      return {
+        privateDataFields: { quota: quota as unknown as JsonValue },
+        state: quotaState(quota),
+      };
+    });
+  } catch (error) {
+    if (error instanceof CodexAuthorizationError) {
+      return { state: { status: "invalid", message: error.message } };
+    }
+    throw error;
   }
-  const quota = parseCodexUsage(body);
-  return {
-    privateData: { ...data, quota } as unknown as JsonValue,
-    state: quotaState(quota),
-  };
 }
 
 function firstText(source: Record<string, unknown>, keys: string[]): string | null {

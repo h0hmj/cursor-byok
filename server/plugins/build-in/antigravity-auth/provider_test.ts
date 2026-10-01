@@ -35,6 +35,7 @@ function context(handlers: { fetch?: FetchHandler; stream?: StreamHandler }): Pl
         return Promise.resolve(handlers.stream(url, init));
       },
     },
+    resource: null,
     signal: new AbortController().signal,
   };
 }

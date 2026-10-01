@@ -1,11 +1,10 @@
 import type { JsonValue, PluginContext } from "cursor-byok:plugin";
 import type { OAuth2AddMethod, OAuth2Begin, OAuth2Poll } from "cursor-byok:resource";
 import { type CredentialCandidate, credentialDraft } from "./resources.ts";
+import { CLIENT_ID, OAUTH_TOKEN_URL } from "./auth.ts";
 
-const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEVICE_CODE_URL = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 const DEVICE_TOKEN_URL = "https://auth.openai.com/api/accounts/deviceauth/token";
-const OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const REDIRECT_URI = "https://auth.openai.com/deviceauth/callback";
 const VERIFICATION_URI = "https://auth.openai.com/codex/device";
 
@@ -103,6 +102,7 @@ async function exchangeAuthorizationCode(
 ): Promise<CredentialCandidate> {
   const response = await context.network.fetch(OAUTH_TOKEN_URL, {
     method: "POST",
+    sensitive: true,
     headers: {
       accept: "application/json",
       "content-type": "application/x-www-form-urlencoded",

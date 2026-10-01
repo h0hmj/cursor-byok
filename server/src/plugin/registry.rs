@@ -1273,6 +1273,7 @@ impl PluginRegistry {
                     executable.to_path_buf(),
                     self.inner.catalog.loader().clone(),
                     self.inner.store.clone(),
+                    self.inner.state.clone(),
                 ))
             })
             .clone()

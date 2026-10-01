@@ -1,5 +1,8 @@
 //! Owns core-side persistence of plugin resources and model catalogs.
+use std::{collections::HashMap, sync::Arc};
+
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use super::data::PluginDataStore;
 use crate::{Error, Result};
@@ -90,6 +93,8 @@ pub struct ResourceDraft {
 pub struct ResourcePatch {
     #[serde(default)]
     pub private_data: Option<serde_json::Value>,
+    #[serde(default)]
+    pub private_data_fields: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     pub state: Option<ResourceStateInput>,
 }
@@ -210,6 +215,7 @@ impl StoredModel {
 #[derive(Clone)]
 pub struct PluginStateStore {
     data: PluginDataStore,
+    resource_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 pub struct UpsertOutcome {
@@ -219,7 +225,21 @@ pub struct UpsertOutcome {
 
 impl PluginStateStore {
     pub fn new(data: PluginDataStore) -> Self {
-        Self { data }
+        Self {
+            data,
+            resource_locks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn resource_lock(&self, plugin_id: &str) -> OwnedMutexGuard<()> {
+        let lock = self
+            .resource_locks
+            .lock()
+            .await
+            .entry(plugin_id.to_owned())
+            .or_default()
+            .clone();
+        lock.lock_owned().await
     }
 
     pub async fn resources(
@@ -243,6 +263,7 @@ impl PluginStateStore {
         resource_type: &str,
         drafts: Vec<ResourceDraft>,
     ) -> Result<UpsertOutcome> {
+        let _guard = self.resource_lock(plugin_id).await;
         let mut records = self.resources(plugin_id, resource_type).await?;
         let now = now_ms();
         let mut outcome = UpsertOutcome {
@@ -288,6 +309,7 @@ impl PluginStateStore {
         resource_id: &str,
         patch: ResourcePatch,
     ) -> Result<()> {
+        let _guard = self.resource_lock(plugin_id).await;
         let mut records = self.resources(plugin_id, resource_type).await?;
         let record = records
             .iter_mut()
@@ -295,6 +317,15 @@ impl PluginStateStore {
             .ok_or_else(|| Error::RunNotFound(format!("plugin resource {resource_id}")))?;
         if let Some(private_data) = patch.private_data {
             record.private_data = private_data;
+        }
+        if let Some(fields) = patch.private_data_fields {
+            record
+                .private_data
+                .as_object_mut()
+                .ok_or_else(|| {
+                    Error::Protocol("plugin privateDataFields requires object privateData".into())
+                })?
+                .extend(fields);
         }
         if let Some(state) = patch.state {
             record.state = state.into();
@@ -310,6 +341,7 @@ impl PluginStateStore {
         resource_type: &str,
         resource_id: &str,
     ) -> Result<ResourceRecord> {
+        let _guard = self.resource_lock(plugin_id).await;
         let mut records = self.resources(plugin_id, resource_type).await?;
         let index = records
             .iter()
@@ -378,6 +410,7 @@ impl PluginStateStore {
     }
 
     pub async fn clear(&self, plugin_id: &str) -> Result<()> {
+        let _guard = self.resource_lock(plugin_id).await;
         self.data.clear(plugin_id).await
     }
 
@@ -423,6 +456,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_account_patches_do_not_overwrite_each_other() {
+        let (_root, store) = store();
+        store
+            .upsert_resources(
+                "dev.example",
+                "account",
+                (0..16)
+                    .map(|index| ResourceDraft {
+                        key: format!("account-{index}"),
+                        private_data: serde_json::json!({"token":"old"}),
+                        state: None,
+                    })
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        let records = store.resources("dev.example", "account").await.unwrap();
+        let mut tasks = tokio::task::JoinSet::new();
+        for record in records {
+            let store = store.clone();
+            tasks.spawn(async move {
+                store
+                    .apply_patch(
+                        "dev.example",
+                        "account",
+                        &record.id,
+                        ResourcePatch {
+                            private_data: Some(serde_json::json!({"token":"rotated"})),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap();
+        }
+        let records = store.resources("dev.example", "account").await.unwrap();
+        assert_eq!(records.len(), 16);
+        assert!(records
+            .iter()
+            .all(|record| record.private_data["token"] == "rotated"));
+    }
+
+    #[tokio::test]
     async fn upserts_resources_by_key_and_applies_patches() {
         let (_root, store) = store();
         let outcome = store
@@ -461,11 +540,11 @@ mod tests {
                 "account",
                 &records[0].id,
                 ResourcePatch {
-                    private_data: None,
                     state: Some(ResourceStateInput::Cooling {
                         retry_at_ms: Some(200),
                         message: None,
                     }),
+                    ..Default::default()
                 },
             )
             .await
@@ -473,6 +552,56 @@ mod tests {
         let records = store.resources("dev.example", "account").await.unwrap();
         assert!(!records[0].state.is_ready(100));
         assert!(records[0].state.is_ready(300), "cooling expires over time");
+    }
+
+    #[tokio::test]
+    async fn quota_field_patch_does_not_restore_credentials_from_a_stale_snapshot() {
+        let (_root, store) = store();
+        store.upsert_resources("dev.example", "account", vec![ResourceDraft {
+            key: "acct-1".into(),
+            private_data: serde_json::json!({"accessToken":"old","refreshToken":"old","quota":null}),
+            state: None,
+        }]).await.unwrap();
+        let record = store
+            .resources("dev.example", "account")
+            .await
+            .unwrap()
+            .remove(0);
+        store
+            .apply_patch(
+                "dev.example",
+                "account",
+                &record.id,
+                serde_json::from_value(serde_json::json!({
+                    "privateDataFields":{"accessToken":"new","refreshToken":"rotated"}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .apply_patch(
+                "dev.example",
+                "account",
+                &record.id,
+                serde_json::from_value(serde_json::json!({
+                    "privateDataFields":{"quota":{"remaining":50}}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let saved = store
+            .resources("dev.example", "account")
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            saved.private_data,
+            serde_json::json!({
+                "accessToken":"new","refreshToken":"rotated","quota":{"remaining":50}
+            })
+        );
     }
 
     #[tokio::test]

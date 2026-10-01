@@ -1,6 +1,6 @@
 import { __getRegisteredPlugin, type JsonValue, type NetworkEventStream, type PluginContext } from "cursor-byok:plugin";
 import type { ModelEvent, ProviderSupport } from "cursor-byok:provider";
-import type { ResourceAddMethod, ResourceSupport } from "cursor-byok:resource";
+import type { ResourceAddMethod, ResourceSnapshot, ResourceSupport } from "cursor-byok:resource";
 
 if (Deno.args.length !== 1) throw new Error("plugin entry URL is required");
 await import(Deno.args[0]);
@@ -42,7 +42,7 @@ async function* streamLines(requestId: string, streamId: string): AsyncGenerator
   }
 }
 
-function contextFor(requestId: string, signal: AbortSignal): PluginContext {
+function contextFor(requestId: string, signal: AbortSignal, hasResource: boolean): PluginContext {
   return {
     network: {
       fetch: (url, init = {}) => hostCall(requestId, "network.fetch", { url, ...init }) as ReturnType<PluginContext["network"]["fetch"]>,
@@ -59,6 +59,10 @@ function contextFor(requestId: string, signal: AbortSignal): PluginContext {
         };
       },
     },
+    resource: hasResource ? {
+      read: () => hostCall(requestId, "resource.read", {}) as Promise<ResourceSnapshot>,
+      patch: (patch) => hostCall(requestId, "resource.patch", { patch }) as Promise<ResourceSnapshot>,
+    } : null,
     signal,
   };
 }
@@ -84,8 +88,8 @@ function addMethod(support: ResourceSupport, methodId: unknown): ResourceAddMeth
 async function dispatch(message: { id: string; method: string; params?: JsonValue }) {
   const controller = new AbortController();
   controllers.set(message.id, controller);
-  const context = contextFor(message.id, controller.signal);
   const params = (message.params ?? {}) as Record<string, JsonValue>;
+  const context = contextFor(message.id, controller.signal, params.resource != null);
   try {
     let result: unknown;
     switch (message.method) {
