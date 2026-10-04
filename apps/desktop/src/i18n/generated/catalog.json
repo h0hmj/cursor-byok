@@ -1105,11 +1105,6 @@
           "file": "shared/ui/Modal.tsx",
           "line": 42,
           "column": 200
-        },
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 115,
-          "column": 20
         }
       ]
     },
@@ -1215,18 +1210,6 @@
           "file": "features/calls/CallDetails.tsx",
           "line": 24,
           "column": 6
-        }
-      ]
-    },
-    "2f7ba5fd1d12f7f9": {
-      "source": "打开使用教程？",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 114,
-          "column": 14
         }
       ]
     },
@@ -1939,18 +1922,6 @@
         }
       ]
     },
-    "4d0680f9efaef147": {
-      "source": "未读",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 84,
-          "column": 67
-        }
-      ]
-    },
     "4d99c976beb8827e": {
       "source": "可用",
       "kind": "text",
@@ -2062,7 +2033,7 @@
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 104,
+          "line": 60,
           "column": 51
         }
       ]
@@ -2671,7 +2642,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 50,
+          "line": 35,
           "column": 47
         }
       ]
@@ -3208,7 +3179,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 46,
+          "line": 31,
           "column": 29
         }
       ]
@@ -3311,7 +3282,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 44,
+          "line": 29,
           "column": 39
         }
       ]
@@ -3352,7 +3323,7 @@
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 104,
+          "line": 60,
           "column": 62
         }
       ]
@@ -3486,18 +3457,6 @@
           "file": "features/plugins/PluginResourcePanels.tsx",
           "line": 419,
           "column": 111
-        }
-      ]
-    },
-    "9b1b7ed518ee401d": {
-      "source": "将在系统浏览器中打开使用教程，是否继续？",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 120,
-          "column": 11
         }
       ]
     },
@@ -3869,18 +3828,6 @@
         }
       ]
     },
-    "a5fb6189a8ad011d": {
-      "source": "打开教程",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 116,
-          "column": 21
-        }
-      ]
-    },
     "a621ab606db2a11f": {
       "source": "密码",
       "kind": "text",
@@ -4100,12 +4047,12 @@
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 126,
+          "line": 71,
           "column": 64
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 126,
+          "line": 71,
           "column": 125
         }
       ]
@@ -4981,7 +4928,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 70,
+          "line": 40,
           "column": 54
         }
       ]
@@ -5145,7 +5092,7 @@
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 48,
+          "line": 33,
           "column": 29
         }
       ]
@@ -5310,7 +5257,7 @@
       "refs": [
         {
           "file": "shell/AppLayout.tsx",
-          "line": 45,
+          "line": 30,
           "column": 44
         }
       ]
@@ -5748,7 +5695,7 @@
         },
         {
           "file": "shell/AppLayout.tsx",
-          "line": 49,
+          "line": 34,
           "column": 46
         }
       ]
@@ -6019,18 +5966,6 @@
           "file": "features/home/HomePage.tsx",
           "line": 201,
           "column": 25
-        }
-      ]
-    },
-    "fec45092945f8790": {
-      "source": "使用教程",
-      "kind": "text",
-      "placeholders": [],
-      "refs": [
-        {
-          "file": "shell/AppLayout.tsx",
-          "line": 51,
-          "column": 48
         }
       ]
     },
